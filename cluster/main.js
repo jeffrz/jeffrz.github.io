@@ -99,6 +99,7 @@ class Node{
         this.highlighted = false;
         this.groupMember = false;
         this.isOnScreen = true; //assume should be drawn unless marked otherwise
+        this.isOnScreenPadded = true; //assume should be drawn unless marked otherwise
 
         this.radius = Node.circleSize(this);
         this.hullPadding = 6;
@@ -750,7 +751,7 @@ function getScaleForDatatype(data, column, size) {
 var MAX_ONSCREEN = 20;
 var CLUSTER_SKIP_SIZE = 5; //clusters of this size or lower aren't broken up further, but may combine with other clusters during the merge phase if they are too small onscreen
 var CLUSTER_AREA_THRESHOLD = 0.05; //percent of screen taken up before breaking apart
-var CLUSTER_AREA_OFFSCREEN_THRESHOLD = 0.1; //percent of screen taken up offscreen before combine
+var CLUSTER_AREA_OFFSCREEN_THRESHOLD = 0.05; //percent of screen taken up offscreen before combine
 var CLUSTER_SPARSENESS_THRESHOLD = 0.0015;
 
 var RECENTLY_EXPANDED = {}; //recently expanded node marking to prevent thrashing of break/combine
@@ -765,7 +766,7 @@ function clearExpansion() {
     RECENTLY_EXPANDED = {};
 }
 
-function adjustClusters(startingNodes, viewSize, isInBounds) {
+function adjustClusters(startingNodes, viewSize, isInBounds, isInBoundsPadded) {
     //list of nodes to break/combine, float of viewport area, function true if point in viewport
 
 
@@ -865,7 +866,7 @@ function adjustClusters(startingNodes, viewSize, isInBounds) {
 
 
             let centroid = node.getHullCentroid(LATVAL, LONVAL);
-            let inBounds = isInBounds(centroid[0],centroid[1]);
+            let inBounds = isInBoundsPadded(centroid[0],centroid[1]);
             if (inBounds &&
                 (percentage < CLUSTER_AREA_THRESHOLD &&
                  sparseness < CLUSTER_SPARSENESS_THRESHOLD)) { //onscreen
@@ -932,7 +933,7 @@ function adjustClusters(startingNodes, viewSize, isInBounds) {
         let percentage = (area === 0 ? 0 : area*100 / viewSize);
         let sparseness = percentage / node.data_rows.length;
         let centroid = node.getHullCentroid(LATVAL, LONVAL);
-        let inBounds = isInBounds(centroid[0],centroid[1]);
+        let inBounds = isInBoundsPadded(centroid[0],centroid[1]);
 
         if (inBounds &&
             (percentage < CLUSTER_AREA_THRESHOLD &&
@@ -980,9 +981,10 @@ function adjustClusters(startingNodes, viewSize, isInBounds) {
 
         if (node.data_rows.length <= CLUSTER_SKIP_SIZE) {
             node.isOnScreen = isInBounds(centroid[0],centroid[1]);
+            node.isOnScreenPadded = isInBoundsPadded(centroid[0],centroid[1]);
             finalNodes.push(node);
         }
-        else if (isInBounds(centroid[0],centroid[1])) {
+        else if (isInBoundsPadded(centroid[0],centroid[1])) {
 
             let area = node.getHullArea(LATVAL, LONVAL);
             let percentage = (area === 0 ? 0 : area*100 / viewSize);
@@ -1074,6 +1076,7 @@ function adjustClusters(startingNodes, viewSize, isInBounds) {
 
                 let centroid = node.getHullCentroid(LATVAL, LONVAL);
                 child.isOnScreen = isInBounds(centroid[0],centroid[1]);
+                child.isOnScreenPadded = isInBoundsPadded(centroid[0],centroid[1]);
                 RECENTLY_EXPANDED[child.id] = 1;
 
             }
@@ -1283,75 +1286,246 @@ function targetForZoomLevel(zoom) {
 // -------------- BEGIN DATA FEATURE EXTRACTION ------------
 
 
-var VALID_NUM_COLUMNS = ['rating','price_numeric','num_reviews'];
+var VALID_NUM_COLUMNS = ['rating',
+                         'price_numeric',
+                         'num_reviews',
+                         'ranking',
+                         'images',
+                         'highlights'];
+var NUM_COLUMN_GETTERS = [function(d) {return parseFloat(d);},
+                        function(d) {return parseFloat(d);},
+                        function(d) {return parseFloat(d);},
+                        function(d) {return parseFloat(d);},
+                        function(d) {return d.length;},
+                        function(d) {return d.length;}];
 var VALID_NOM_COLUMNS = ['categories'];
 
+var DESC_STATS = {};
+var CLUSTER_STATS = {};
 var RAW_SCORES = {};
 
 
-function rankLeaves(leaf_nodes, bounds) {
+function gatherStats(leaf_nodes) {
 
-    let ranking = [];
-    let i=0;
-    let ratingMax = -Number.MAX_VALUE;
-    let ratingMin = Number.MAX_VALUE;
-    let reviewMax = -Number.MAX_VALUE;
-    let reviewMin = Number.MAX_VALUE;
-    let rankMin = -Number.MAX_VALUE;
-    let rankMax = Number.MAX_VALUE;
-    let picsMax = -Number.MAX_VALUE;
-    let picsMin = Number.MAX_VALUE;
-    let snipsMax = -Number.MAX_VALUE;
-    let snipsMin = Number.MAX_VALUE;
-    while (i<leaf_nodes.length) {
-        let node = leaf_nodes[i];
-        ranking.push(node);
-        let rating = node.data_src[node.data_rows[0]]['rating'];
-        if (rating < ratingMin) { ratingMin = rating; }
-        if (rating > ratingMax) { ratingMax = rating; }
-        let reviews = node.data_src[node.data_rows[0]]['num_reviews'];
-        if (reviews < reviewMin) { reviewMin = reviews; }
-        if (reviews > reviewMax) { reviewMax = reviews; }
-        let rank = node.data_src[node.data_rows[0]]['ranking'];
-        if (rank < rankMin) { rankMin = rank; }
-        if (rank > rankMax) { rankMax = rank; }
-        let pics = node.data_src[node.data_rows[0]]['images'].length;
-        if (pics < picsMin) { picsMin = pics; }
-        if (pics > picsMax) { picsMax = pics; }
-        let snips = node.data_src[node.data_rows[0]]['highlights'].length;
-        if (snips < snipsMin) { snipsMin = snips; }
-        if (snips > snipsMax) { snipsMax = snips; }
-        i++;
+    let scratch = leaf_nodes.slice();
+
+    for (let k=0; k<VALID_NUM_COLUMNS.length; k++) {
+        let col = VALID_NUM_COLUMNS[k];
+        let getter = NUM_COLUMN_GETTERS[k];
+
+        scratch.sort(function (a,b) {
+            let aRating = getter(a.data_src[a.data_rows[0]][col]);
+            let bRating = getter(b.data_src[b.data_rows[0]][col]);
+            return bRating-aRating;
+        });
+        let sum=0;
+        let i=scratch.length-1;
+        while (i>=0) {
+            sum = sum + getter(scratch[i].data_src[scratch[i].data_rows[0]][col]);
+            i--;
+        }
+        let mean = sum / scratch.length;
+        sum = 0;
+        i=scratch.length-1;
+        while (i>=0) {
+            sum = sum + Math.pow(getter(scratch[i].data_src[scratch[i].data_rows[0]][col]) - mean,2);
+            i--;
+        }
+        let sd = Math.sqrt(sum / scratch.length);
+
+        DESC_STATS[col] = {mean: mean,
+                           max: getter(scratch[0].data_src[scratch[0].data_rows[0]][col]),
+                           min: getter(scratch[0].data_src[scratch[scratch.length-1].data_rows[0]][col]),
+                           median: getter(scratch[0].data_src[scratch[Math.floor(scratch.length/2.0)].data_rows[0]][col]),
+                           sd: sd };
+        DESC_STATS[col].scale = d3.scaleLinear().domain([DESC_STATS[col].min, DESC_STATS[col].max]).range([0, 1]);
+
+
     }
 
-    var ratingScale = d3.scaleLinear().domain([ratingMin, ratingMax]).range([0, 1]);
-    var reviewScale = d3.scaleLinear().domain([reviewMin, reviewMax]).range([0, 1]);
-    var picsScale = d3.scaleLinear().domain([picsMin, picsMax]).range([0, 1]);
-    var snipsScale = d3.scaleLinear().domain([snipsMin, snipsMax]).range([0, 1]);
-    var rankScale = d3.scaleLinear().domain([rankMin, rankMax]).range([0, 1]);
+    let pop_cutoff = 0.5;
+    let rating_cutoff = 3.9;
 
-    let latMin = bounds.getSouthWest().lat();
-    let latMax = bounds.getNorthEast().lat();
-    var latScale = d3.scaleLinear().domain([latMin, latMax]).range([0, 1]);
-    let lonMin = bounds.getSouthWest().lng();
-    let lonMax = bounds.getNorthEast().lng();
-    var lonScale = d3.scaleLinear().domain([lonMin, lonMax]).range([0, 1]);
+    for (let k=0; k<VALID_NOM_COLUMNS.length; k++) {
+        let col = VALID_NOM_COLUMNS[k];
+
+        let raw_counts = {};
+        let popular_counts = {};
+        let best_counts = {};
+        let ranked_by_genre = {};
+
+        let i=scratch.length-1;
+        while (i>=0) {
+            let node = scratch[i];
+            let k = node.data_src[node.data_rows[0]][col].length-1;
+            while (k>=0) {
+                let v = node.data_src[node.data_rows[0]][col][k];
+                let popular = DESC_STATS['num_reviews'].scale(parseFloat(node.data_src[node.data_rows[0]]['num_reviews']));
+                let rating = parseFloat(node.data_src[node.data_rows[0]]['rating']);
+
+                if (!(v in raw_counts)) {
+                    raw_counts[v] = 0;
+                    popular_counts[v] = 0;
+                    best_counts[v] = 0;
+                    ranked_by_genre[v] = [];
+                }
+
+                raw_counts[v] = raw_counts[v] + 1;
+                ranked_by_genre[v].push(node.data_rows[0]);
+                if (popular >= pop_cutoff) {
+                    popular_counts[v] = popular_counts[v] + 1;
+                }
+                if (rating >= rating_cutoff) {
+                    best_counts[v] = best_counts[v] + 1;
+                }
+
+                k--;
+            }
+            i--;
+        }
+
+        for (let col in ranked_by_genre) {
+            ranked_by_genre[col].sort(function(a,b) {
+                return parseFloat(scratch[0].data_src[b]['ranking']) -
+                       parseFloat(scratch[0].data_src[a]['ranking']);
+            });
+        }
+
+        DESC_STATS[col] = {
+            count: raw_counts,
+            popular: popular_counts,
+            high_rated: best_counts,
+            ranked: ranked_by_genre
+        };
+    }
+
+
+    console.log(DESC_STATS);
+    return DESC_STATS;
+}
+
+function clusterStats(n) {
+
+    if (n.id in CLUSTER_STATS) {
+        return CLUSTER_STATS[n.id];
+    }
+
+    let stats = {};
+
+    let rows = n.data_rows.slice();
+
+    for (let k=0; k<VALID_NUM_COLUMNS.length; k++) {
+        let col = VALID_NUM_COLUMNS[k];
+        let getter = NUM_COLUMN_GETTERS[k];
+
+        rows.sort(function (a,b) {
+            let aRating = getter(n.data_src[a][col]);
+            let bRating = getter(n.data_src[b][col]);
+            return bRating-aRating;
+        });
+        let sum=0;
+        let i=rows.length-1;
+        while (i>=0) {
+            sum = sum + getter(n.data_src[rows[i]][col]);
+            i--;
+        }
+        let mean = sum / rows.length;
+        sum = 0;
+        i=rows.length-1;
+        while (i>=0) {
+            sum = sum + Math.pow(getter(n.data_src[rows[i]][col]) - mean,2);
+            i--;
+        }
+        let sd = Math.sqrt(sum / rows.length);
+
+        stats[col] = {mean: mean,
+                           max: getter(n.data_src[rows[0]][col]),
+                           min: getter(n.data_src[rows[rows.length-1]][col]),
+                           median: getter(n.data_src[rows[Math.floor(rows.length/2.0)]][col]),
+                           sd: sd };
+        stats[col].scale = d3.scaleLinear().domain([stats[col].min, stats[col].max]).range([0, 1]);
+
+
+    }
+
+    let pop_cutoff = 0.5;
+    let rating_cutoff = 3.9;
+
+    for (let k=0; k<VALID_NOM_COLUMNS.length; k++) {
+        let col = VALID_NOM_COLUMNS[k];
+
+        let raw_counts = {};
+        let popular_counts = {};
+        let best_counts = {};
+        let ranked_by_genre = {};
+
+        let i=rows.length-1;
+        while (i>=0) {
+            let row = rows[i];
+            let k = n.data_src[row][col].length-1;
+            while (k>=0) {
+                let v = n.data_src[row][col][k];
+                let popular = DESC_STATS['num_reviews'].scale(parseFloat(n.data_src[row]['num_reviews']));
+                let rating = parseFloat(n.data_src[row]['rating']);
+
+                if (!(v in raw_counts)) {
+                    raw_counts[v] = 0;
+                    popular_counts[v] = 0;
+                    best_counts[v] = 0;
+                    ranked_by_genre[v] = [];
+                }
+
+                raw_counts[v] = raw_counts[v] + 1;
+                ranked_by_genre[v].push(row);
+                if (popular >= pop_cutoff) {
+                    popular_counts[v] = popular_counts[v] + 1;
+                }
+                if (rating >= rating_cutoff) {
+                    best_counts[v] = best_counts[v] + 1;
+                }
+
+                k--;
+            }
+            i--;
+        }
+
+        for (let col in ranked_by_genre) {
+            ranked_by_genre[col].sort(function(a,b) {
+                return parseFloat(n.data_src[b]['ranking']) -
+                       parseFloat(n.data_src[a]['ranking']);
+            });
+        }
+
+        stats[col] = {
+            count: raw_counts,
+            popular: popular_counts,
+            high_rated: best_counts,
+            ranked: ranked_by_genre
+        };
+    }
+
+    CLUSTER_STATS[n.id] = stats;
+    return stats;
+
+}
+
+
+function rankLeaves(leaf_nodes) {
+
+    let scratch = leaf_nodes.slice();
 
     //for now leaving out BOUNDS since it makes the recommendation unstable when panning
-    function score(rating, reviews, ranking, lat, lon, picNum, snipNum) {
+    function score(rating, reviews, ranking, picNum, snipNum) {
         //range from 1 to 5.6
         return (rating +
-
-                reviewScale(reviews) * 1.3 + //reviews can boost up or down a score
-                //Math.abs(latScale(lat)-0.5)*-1 +
-                //Math.abs(lonScale(lon)-0.5)*-1 + //manhattan centrality penalizes;
-                picsScale(picNum) * 0.2 + //pictures boost scores
-                snipsScale(snipNum) * 0.5 +
-                rankScale(ranking) * - 1);
+                DESC_STATS['num_reviews'].scale(reviews) * 1.3 + //reviews can boost up or down a score
+                DESC_STATS['images'].scale(picNum) * 0.2 + //pictures boost scores
+                DESC_STATS['highlights'].scale(snipNum) * 0.5 +
+                DESC_STATS['ranking'].scale(ranking) * - 1);
 
     }
 
-    ranking.sort( function(a,b) {
+    scratch.sort( function(a,b) {
         let aRating = a.data_src[a.data_rows[0]]['rating'];
         let bRating = b.data_src[b.data_rows[0]]['rating'];
         let aReviews = a.data_src[a.data_rows[0]]['num_reviews'];
@@ -1362,13 +1536,9 @@ function rankLeaves(leaf_nodes, bounds) {
         let bSnips = b.data_src[b.data_rows[0]]['highlights'].length;
         let aPics = a.data_src[a.data_rows[0]]['images'].length;
         let bPics = b.data_src[b.data_rows[0]]['images'].length;
-        let aLat = a.data_src[a.data_rows[0]][LATVAL];
-        let bLat = b.data_src[b.data_rows[0]][LATVAL];
-        let aLon = a.data_src[a.data_rows[0]][LONVAL];
-        let bLon = b.data_src[b.data_rows[0]][LONVAL];
 
-        return score(bRating, bReviews, bRanking, bLat, bLon, bPics, bSnips) -
-               score(aRating, aReviews, aRanking, aLat, aLon, aPics, aSnips);
+        return score(bRating, bReviews, bRanking, bPics, bSnips) -
+               score(aRating, aReviews, aRanking, aPics, aSnips);
     });
 
     /*
@@ -1379,40 +1549,78 @@ function rankLeaves(leaf_nodes, bounds) {
         i++;
     }*/
 
-    return ranking;
+    return scratch;
 
 }
+
+
+function explainLeaf(leafNode, cluster) {
+
+    //ignoring user level features for now
+
+    //overall stats
+    let overall_list = {
+        best: parseFloat(leafNode.data_src[leafNode.data_rows[0]]['ranking']) <= 10,
+        rating: DESC_STATS['rating'].scale(parseFloat(leafNode.data_src[leafNode.data_rows[0]]['rating'])) >= 0.9,
+        popularity: DESC_STATS['rating'].scale(parseFloat(leafNode.data_src[leafNode.data_rows[0]]['rating'])) >= 0.9,
+        genre_top10: [],
+        genre_best: [],
+    };
+    for (let cat of leafNode.data_src[leafNode.data_rows[0]]['categories']) {
+        if (DESC_STATS['categories']['ranked'][cat].indexOf(leafNode.data_rows[0]) < 10 &&
+            DESC_STATS['categories']['count'][cat] > 10) {
+                overall_list.genre_top10.push(cat);
+                if (DESC_STATS['categories']['ranked'][cat].indexOf(leafNode.data_rows[0]) === 0 &&
+                    DESC_STATS['categories']['count'][cat] > 10) {
+                        overall_list.genre_best.push(cat);
+                }
+        }
+    }
+
+    //as compared to cluster
+
+
+
+}
+
+
+
+
 
 
 function scoreNodes(data, slicedNodes) {
 
     //standard error of mean for all numeric columns
-    let datastore = {};
+    let errors = {};
+    let means = {};
     let i=0;
     while (i<VALID_NUM_COLUMNS.length) {
         let col = VALID_NUM_COLUMNS[i];
 
-        let pop_mean = d3.mean(data, function(d) {return d[col];});
-        let pop_sd = d3.deviation(data, function(d) {return d[col];});
+        let pop_mean = DESC_STATS[col].mean;
+        let pop_sd = DESC_STATS[col].sd;
         //console.log(col,pop_mean, pop_sd);
 
         let j=0;
         while (j<slicedNodes.length) {
             let node = slicedNodes[j];
 
-            if (!(node.id in datastore)) {
-                datastore[node.id] = {};
+            if (!(node.id in errors)) {
+                errors[node.id] = {};
+            }
+            if (!(node.id in means)) {
+                means[node.id] = {};
             }
 
-            if (node.data_rows.length > 1 && !(col in datastore[node.id])) {
+            if (node.data_rows.length > 1 && !(col in errors[node.id])) {
                 let n = node.data_rows.length;
                 let node_mean = d3.mean(node.data_rows, function(d) {return data[d][col];});
                 let node_sd = d3.deviation(node.data_rows, function(d) {return data[d][col];});
 
                 let z = (node_mean - pop_mean) / (pop_sd / n);
                 //console.log(col, node.id, n, node_mean, node_sd, z);
-
-                datastore[node.id][col] = z;
+                means[node.id][col] = node_mean;
+                errors[node.id][col] = z;
 
             }
 
@@ -1424,10 +1632,12 @@ function scoreNodes(data, slicedNodes) {
 
     //tf-idf ish for all nom columns
     // for now we normalize the counts rather than using raw counts
+    let tfidf = {};
     i=0;
     while (i<VALID_NOM_COLUMNS.length) {
         let col = VALID_NOM_COLUMNS[i];
 
+        /*
         let pop_frequencies = {};
         let max_freq = 0;
         let n=data.length-1;
@@ -1447,6 +1657,7 @@ function scoreNodes(data, slicedNodes) {
         }
 
         //console.log(pop_frequencies);
+        */
 
         //gather node and doc frequencies
         let doc_frequencies = {};
@@ -1455,7 +1666,11 @@ function scoreNodes(data, slicedNodes) {
         while (j<slicedNodes.length) {
             let node = slicedNodes[j];
 
-            if (node.data_rows.length > 1 && !(col in datastore[node.id])) {
+            if (!(node.id in tfidf)) {
+                tfidf[node.id] = {};
+            }
+
+            if (node.data_rows.length > 1 && !(col in tfidf[node.id])) {
                 let n = node.data_rows.length;
                 doc_count++;
 
@@ -1499,7 +1714,7 @@ function scoreNodes(data, slicedNodes) {
                 }
 
                 //console.log(term_frequencies);
-                datastore[node.id][col] = term_frequencies;
+                tfidf[node.id][col] = term_frequencies;
 
             }
 
@@ -1516,12 +1731,12 @@ function scoreNodes(data, slicedNodes) {
             let node = slicedNodes[j];
 
             if (node.data_rows.length > 1) {
-                for (let term in datastore[node.id][col]) {
-                    datastore[node.id][col][term] = datastore[node.id][col][term] * doc_frequencies[term];
+                for (let term in tfidf[node.id][col]) {
+                    tfidf[node.id][col][term] = tfidf[node.id][col][term] * doc_frequencies[term];
                 }
             }
 
-            //console.log(datastore[node.id][col]);
+            //console.log(tfidf[node.id][col]);
             j++;
 
         }
@@ -1533,7 +1748,9 @@ function scoreNodes(data, slicedNodes) {
     }
 
 
-    RAW_SCORES = datastore;
+    RAW_SCORES = {  means: means,
+                    errors: errors,
+                    tfidf: tfidf };
 
 
 
@@ -1583,6 +1800,8 @@ function SVGOverlay (map, data) {
     this.slicedNodes = [];
     this.last_layout_bounds = null;
 
+    this.CANVAS_TILE_DB = {};  //db->node_id->tiles_for_node
+    this.currentCanvasTiles = null;
 
     this.onPan = this.onPan.bind(this);
     this.onBoundsChanged = this.onBoundsChanged.bind(this);
@@ -1662,6 +1881,8 @@ SVGOverlay.prototype.buildSlices = function () {
 
 };
 
+
+var PREVIOUS_PX_BOUNDS = []
 SVGOverlay.prototype.updateSlices = function () {
 
     //console.log("updateslices");
@@ -1676,10 +1897,19 @@ SVGOverlay.prototype.updateSlices = function () {
 
     //adjust padding to make sure scrolling pop doesn't happen
     //count stuff 1/2 screen away as visible
-    LATPAD = Math.abs(latMax - latMin) * 1;
-    LONPAD = Math.abs(lonMax - lonMin) * 1;
+    LATPAD = Math.abs(latMax - latMin) * 0.4;
+    LONPAD = Math.abs(lonMax - lonMin) * 0.4;
 
     function isInBounds(lat, lon) {
+        if ((lat > latMin) && (lat < latMax) &&
+           (lon > lonMin) && (lon < lonMax)) {
+            return true;
+           }
+        else {
+            return false;
+        }
+    }
+    function isInBoundsPadded(lat, lon) {
         if ((lat > latMin-LATPAD) && (lat < latMax+LATPAD) &&
            (lon > lonMin-LONPAD) && (lon < lonMax+LONPAD)) {
             return true;
@@ -1705,9 +1935,9 @@ SVGOverlay.prototype.updateSlices = function () {
     //console.log('lat'+(latMax-latMin)+' lon'+(lonMax-lonMin)+' view'+viewSize);
 
 
-
-    this.slicedNodes = adjustClusters(this.slicedNodes, viewSize, isInBounds);
-
+    if (viewSizeChanged) {
+    this.slicedNodes = adjustClusters(this.slicedNodes, viewSize, isInBounds, isInBoundsPadded);
+}
     //scoreNodes(DATASET, this.slicedNodes);
 
    //set up all nodes as paths -- we get fancy enclosing ones for groups
@@ -1724,10 +1954,11 @@ SVGOverlay.prototype.updateSlices = function () {
 SVGOverlay.prototype.onAdd = function () {
     this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     this.svg.style.position = 'absolute';
-    this.svg.style.top = 0;
-    this.svg.style.left = 0;
+    this.svg.style.top = '8px';
+    this.svg.style.left = '8px';
     this.svg.style.width = '1100px';
     this.svg.style.height = '600px';
+    this.svg.style.zIndex = 100;
     this.svg.style.pointerEvents = 'none';
     this.svg.id = "mapSVG"
     this.width = 1100;
@@ -1741,19 +1972,31 @@ SVGOverlay.prototype.onAdd = function () {
 
     d3.select(this.svg)
         .append('g')
-        .attr('id', 'region_overlay');
+        .attr('id', 'region_overlay')
+        .attr('x_offset', 0)
+        .attr('y_offset', 0);
 
     d3.select(this.svg)
         .append('g')
-        .attr('id', 'recommendation_overlay');
+        .attr('id', 'recommendation_overlay')
+        .attr('x_offset', 0)
+        .attr('y_offset', 0);
 
     d3.select(this.svg)
         .append('defs')
         .attr('id', 'path_defs');
 
+    d3.select("#popoverContainer")
+        .attr("width", 1100)
+        .attr("height", 600);
+
     d3.select("#popoverLines")
         .attr("width", 1100)
         .attr('height', 600);
+
+    d3.select("#canvasContainer")
+        .attr('x_offset', 0)
+        .attr('y_offset', 0);
 
     d3.select('#region_overlay').attr('class', 'coords');
 
@@ -1796,16 +2039,24 @@ SVGOverlay.prototype.onBoundsChanged = function () {
 
     if (this.recentlyZoomed) {
         this.recentlyZoomed=false;
-        return this.onZoomFinished();
+        this.onZoomFinished();
     }
 
     //this.updateRegionView();
     this.updateLeavesOnscreen();
 
-
+    let bounds = this.map.getBounds();
     this.updateSlices();
-    this.updateForceModelWithNewBounds(this.map.getBounds());
+    this.updateForceModelWithNewBounds(bounds);
     this.updatePopoverObjectsFromForce(false, false);
+
+    if (this.last_layout_bounds) {
+        translateRegionView(this.last_layout_bounds, bounds);
+        this.last_layout_bounds = bounds;
+    }
+    else {
+        this.redrawRegionView(bounds);
+    }
 
 };
 
@@ -1856,16 +2107,28 @@ SVGOverlay.prototype.onZoomFinished = function () {
     // clearExpansion();
 
     this.last_layout_bounds = null; //wipe past transform on popovers etc
+    this.currentCanvasTiles = null;
     let projection = this.getProjection();
+    let bounds = this.map.getBounds();
     //this.resetAllPopupPositions( projection );
     //this.layoutPopups( projection );
 
+    this.rebuildForceModel();
+
+    /*
     this.updateLeavesOnscreen();
     this.updateSlices();
     // console.log('DONE_ZOOM');
 
 
-    this.rebuildForceModel();
+
+    if (this.last_layout_bounds) {
+        translateRegionView(this.last_layout_bounds, bounds);
+        this.last_layout_bounds = bounds;
+    }
+    else {
+        this.redrawRegionView(bounds);
+    }*/
 
 };
 
@@ -1908,7 +2171,7 @@ SVGOverlay.prototype.drawSingletons = function (single, bounds, viewSize, viewSi
 
     svg.selectAll("circle.singleton").data(single).enter().append("circle")
         .attr("class", "datapoint singleton")
-        .attr('r', 6);
+        .attr('r', 4);
 
     svg.selectAll("circle.singleton").data(single).exit().remove();
 
@@ -1937,10 +2200,10 @@ SVGOverlay.prototype.drawPaths = function (over, bounds, viewSize, viewSizeChang
     //if view size changed, update the path variable
     //if (viewSizeChanged) {
         //console.log("buildpaths");
-        /*
+
         svg.selectAll("path.group")
-            .attr("d", function(d) {return d.getPathDProj(LATVAL, LONVAL, projection);})
-            .on("mouseover", function(d) {
+            .attr("d", function(d) {return d.getPathDProj(LATVAL, LONVAL, projection);});
+            /*.on("mouseover", function(d) {
                 d3.select(".tooltip").transition()
                     .duration(200)
                     .style("opacity", .9);
@@ -1963,6 +2226,157 @@ SVGOverlay.prototype.drawPaths = function (over, bounds, viewSize, viewSizeChang
     });*/
 
 };
+
+/*
+
+SVGOverlay.prototype.drawSimplePathCanvas = function () {
+
+    let width = 1100;
+    let height = 600;
+
+    let canvas = d3.select("#canvasContainer").append("div")
+                .attr("class","canvasWrapper")
+                .append("canvas").node();
+    let context = canvas.getContext("2d");
+    d3.timer(redraw);
+
+    function redraw() {
+      canvas.width = width*2;
+      canvas.height = height*2;
+      canvas.style.width = width + "px";
+      canvas.style.height = height + "px";
+      let i=LEAVES_ONSCREEN.length-1;
+      while (i>=0) {
+          draw(LEAVES_ONSCREEN[i]);
+          i--;
+      }
+    }
+
+    let t = this;
+
+    function draw(node) {
+        let latLng = new google.maps.LatLng(node.data_src[node.data_rows[0]][LATVAL], node.data_src[node.data_rows[0]][LONVAL]);
+        let proj = t.getProjection().fromLatLngToContainerPixel(latLng);
+
+      context.beginPath();
+      context.arc(proj.x, proj.y, 4, 0, 2 * Math.PI);
+      context.stroke();
+
+
+    }
+}
+*/
+
+
+
+
+SVGOverlay.prototype.drawPathCanvases = function (tiles, bounds) {
+
+    //might be faster to draw it all on one big canvas!
+    //or use some kind of screen tiling system to queue up stuff that isn't quite onscreen
+
+    //console.log("DRAW CANVAS")
+    var projection = this.getProjection();
+    var container = d3.select("#canvasContainer");
+    let zoom = this.map.getZoom();
+
+
+    container.selectAll("div.canvasWrapper").data(tiles).enter().append("div")
+        .attr("class", "canvasWrapper").style("position","absolute").append("canvas");
+
+    container.selectAll("div.canvasWrapper").data(tiles).exit().remove();
+
+    container.selectAll("div.canvasWrapper").each( function(d,i) {
+        //update canvas contents if need be
+        let nids = d3.select(this).property(" __prevNodes__");
+        let z = d3.select(this).attr("z_level");
+        let sameNode = true;
+        if (nids && nids.length === d.node_id.length) {
+                let sum = 0;
+                var t = nids.length-1;
+                while (t>=0) { sum += parseInt(nids[t]); t--; }
+                if (sum != d.node_sum) {
+                    sameNode = false;
+                }
+            //HACK - Yes, this may be wrong rarely, but it is faster. Yell at me when it bugs out
+            /*
+            for (let id1 of nids) {
+                if (!d.node_id.includes(id1)) {
+                    sameNode = false;
+                    break;
+                }
+            }*/
+        }
+        else { sameNode = false; }
+
+        if (!sameNode || z === "" || parseInt(z) != zoom) {
+            console.log("redrawing tile");
+            d3.select(this).property(" __prevNodes__", function(d){ return d.node_id; } );
+
+            d3.select(this).attr("z_level", zoom);
+
+            let canvas = d3.select(this).select("canvas").node();
+
+            canvas.width = d.tile_sz+(d.overflow*2);
+            canvas.height = d.tile_sz+(d.overflow*2);
+
+
+
+
+
+
+            let ctx = canvas.getContext('2d');
+            //ctx.clearRect(0, 0, canvas.width, canvas.height);
+            /*
+            let j=d.circles.length-1;
+            while (j>=0) {
+                let c=d.circles[j];
+
+
+
+                ctx.fillStyle = colorForNode(c.data_row);
+                ctx.beginPath();
+                ctx.arc(Math.floor(c.ox+d.overflow),Math.floor(c.oy+d.overflow),CIRCLE_SIZE,0,2*Math.PI);
+                ctx.stroke();
+                ctx.fill();
+
+                j--;
+            }*/
+
+            let offscreenData = d.canvas;
+
+            // copy into visual canvas at different position
+            ctx.putImageData(offscreenData, 0, 0);
+
+        }
+
+        //move to correct location
+
+        //d3.select(this).style("top", (d.upperLeft.y) + "px")
+        //               .style("left", (d.upperLeft.x) + "px");
+        d3.select(this).style("transform", "translate("+parseInt(d.proj.x - d.overflow)+"px,"+parseInt(d.proj.y - d.overflow)+"px)")
+                        .style("top", 0 + "px")
+                       .style("left", 0+ "px");
+
+
+
+    });
+
+
+
+};
+/*
+function updateCanvasPositions(offset_x, offset_y) {
+
+    d3.selectAll(".canvasWrapper").each(function (d,i) {
+
+        d3.select(this).style("top", (this.style.top + offset_y) + "px")
+                       .style("left", (this.style.left + offset_x) + "px");
+
+    });
+
+}*/
+
 
 SVGOverlay.prototype.drawPathLabels = function (over, bounds, viewSize, viewSizeChanged) {
 
@@ -2225,6 +2639,203 @@ SVGOverlay.prototype.repositionRecommended = function (bounds) {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+SVGOverlay.prototype.updateRegionView = function (bounds, viewSize, viewSizeChanged) {
+
+    //agnostic to any zoom/pan level, just updates according to standard heuristics
+
+    //mark circle elements for singletons
+    var single = this.slicedNodes.filter(function(d) { return (d.data_rows.length < 2) &&
+                                                              (d.isOnScreenPadded); });
+
+    this.drawSingletons(single, bounds, viewSize, viewSizeChanged);
+
+    //mark path elements for groups
+    let over = this.slicedNodes.filter(function(d) { return (d.data_rows.length >= 2) &&
+                                                            (d.isOnScreenPadded); });
+
+    this.drawPaths(over, bounds, viewSize, viewSizeChanged);
+
+
+    //labels for paths
+    //this.drawPathLabels(over, bounds, viewSize, viewSizeChanged);
+
+
+    //quantitative bins
+    //CANCEL FOR NOW
+    //this.drawQuantBins(over, bounds, viewSize, viewSizeChanged);
+
+
+/*
+    var svg = d3.select("#region_overlay");
+        var projection = this.getProjection();
+    var debugLayer = svg.selectAll("circle.debug")
+                        .data(LEAF_NODES);
+    debugLayer.enter().append("circle")
+            .attr("class", "debug")
+            .attr('fill', '#888')
+            .attr('stroke', '#444')
+            .attr('stroke-width', '1px')
+            .attr('opacity', '0.5')
+            .attr('r', 2);
+    debugLayer.exit().remove();
+
+    d3.select("#region_overlay").selectAll("circle.debug").each( function (d,i) {
+        let proj = d.getCenterDProj(LATVAL, LONVAL, projection);
+        d3.select(this).attr('cx',proj[0])
+                       .attr('cy',proj[1]);
+    });*/
+
+
+
+
+};
+
+
+SVGOverlay.prototype.redrawRegionView = function (bounds) {
+    //console.log("redraw");
+    //ought to move everything from update to redraw/translate for better performance
+    //also need better cleaning/identifying things that are going to be onscreen
+
+
+    //var single = this.slicedNodes.filter(function(d) { return (d.data_rows.length < 2) &&
+    //                                                          (d.isOnScreen); });
+    let over = this.slicedNodes.filter(function(d) { return (d.data_rows.length >= 2) &&
+                                                            (d.isOnScreenPadded); });
+
+
+    if (this.currentCanvasTiles) {
+        let tiles = this.fetchOnlyOnscreenTilesAndRender(this.currentCanvasTiles, this.map.getBounds(), false, {});
+        this.drawPathCanvases(tiles, bounds);
+    }
+    else {
+        this.currentCanvasTiles = this.getCanvasTilesForClustersAtCurrentZoom(over);
+        let tiles = this.fetchOnlyOnscreenTilesAndRender(this.currentCanvasTiles, this.map.getBounds(), false, {});
+        this.drawPathCanvases(tiles, bounds);
+    }
+
+    //draw the canvases
+
+
+};
+
+
+SVGOverlay.prototype.translateRegionView = function (old_bounds, new_bounds) {
+
+    //need to implement pass to check if need to render new items that have come onscreen
+
+    console.log("translate");
+    let projection = this.getProjection();
+    let bounds = this.map.getBounds();
+
+    let old_proj = projection.fromLatLngToContainerPixel(old_bounds.getSouthWest());
+    let new_proj = projection.fromLatLngToContainerPixel(new_bounds.getSouthWest());
+
+    let offset = {x: new_proj.x - old_proj.x, y: new_proj.y - old_proj.y};
+
+
+    //just move around the recommended circle
+    this.repositionRecommended(bounds);
+
+
+    if (this.currentCanvasTiles) {
+        let tiles = fetchOnlyOnscreenTilesAndRender(this.currentCanvasTiles, this.map.bounds, false, {});
+        this.drawPathCanvases(tiles, bounds);
+    }
+    else {
+        this.currentCanvasTiles = getCanvasTilesForClustersAtCurrentZoom(over);
+        let tiles = fetchOnlyOnscreenTilesAndRender(this.currentCanvasTiles, this.map.bounds, false, {});
+        this.drawPathCanvases(tiles, bounds);
+    }
+
+
+
+}
+
+
+SVGOverlay.prototype.onMouseClick = function (e) {
+
+
+
+
+
+
+
+
+    let projection = this.getProjection();
+    let loc = projection.fromLatLngToContainerPixel(e.latLng);
+    console.log(e.latLng.lat(),e.latLng.lng());
+    let x = Math.round(Math.abs(loc.x));
+    let y= Math.round(Math.abs(loc.y));
+
+    let scores = scoreNodes(DATASET, this.slicedNodes);
+
+    rankLeaves(LEAF_NODES, this.map.getBounds());
+
+    d3.selectAll("path.group").each(function(d,i) {
+
+
+        if (d.checkContainment(LATVAL,LONVAL,[e.latLng.lat(),e.latLng.lng()])) {
+
+
+
+            console.log(clusterStats(d));
+
+
+            let lst = d3.select("#datadump").html("").append("ul");
+            let score = RAW_SCORES;
+
+            //console.log(score);
+            for (let col of VALID_NUM_COLUMNS) {
+                lst.append("li").text(col+": M"+score.means[d.id][col]+" E"+score.errors[d.id][col]);
+            }
+            for (let col of VALID_NOM_COLUMNS) {
+                for (let term in score.tfidf[d.id][col]) {
+                    if (score.tfidf[d.id][col][term] > 0.1) {
+                        lst.append("li").text(term+": "+score.tfidf[d.id][col][term]);
+                    }
+                }
+            }
+
+
+        }
+
+
+    });
+
+
+
+};
+
+
+
+
+
+
+
+
+
+
 //new force model stuff
 
 //https://bl.ocks.org/cmgiven/547658968d365bcc324f3e62e175709b
@@ -2377,7 +2988,6 @@ function boundedBox() {
     return force
 }
 
-//xyzzy
 
 let PAD_NODES = 0;
 var force_nodes = []; //store all active nodes in simulation
@@ -2386,7 +2996,9 @@ var repelForce = d3.forceManyBody().strength(function(d) {return d.type == "pop"
 var linkForce = d3.forceLink().iterations(3);
 var centerForce = d3.forceCenter();
 var boundingForce = boundedBox().size(function (d) { return [d.width, d.height]; });
-var collideForce = rectCollide().strength(1).iterations(4).size(function (d) { return [d.width, d.height]; });
+var collideForce = rectCollide().strength(1).iterations(5).size(function (d) { return [d.width, d.height]; });
+var xForce = d3.forceX().strength(0.1);
+var yForce = d3.forceY().strength(0.1);
 
 SVGOverlay.prototype.updateForceModelWithNewBounds = function (bounds) {
     let latMin = bounds.getSouthWest().lat();
@@ -2407,9 +3019,12 @@ SVGOverlay.prototype.updateForceModelWithNewBounds = function (bounds) {
     centerForce.x((lonMax+lonMin) / 2.0)
                .y((latMax+latMin) / 2.0);
 
-    linkForce.distance(latDist*0.3);
+    linkForce.distance(latDist*0.2);
 
     boundingForce.bounds([[lonMin+lonPad, latMin+latPadBot], [lonMax-lonPad, latMax-latPad]]);
+
+    xForce.x(function(d) {return d.type == "pop" ? d.l_x + (d.go_left ? -lonDist*0.2 : lonDist*0.2) : 0;});
+    yForce.y(function(d) {return d.type == "pop" ? d.l_y + latDist*0.2: 0;});
 
     /*
     //only reset the model if we're applying boundingForce
@@ -2432,6 +3047,7 @@ function point2LatLng(x, y, projection, bounds, zoom) {
 SVGOverlay.prototype.rebuildForceModel = function () {
     //everything done in lat/lng until we hit position update step
     //always reconstruct FORCE_MODEL
+    console.log("REBUILD FORCE")
 
     let projection = this.map.getProjection();
     let bounds = this.map.getBounds();
@@ -2456,7 +3072,7 @@ SVGOverlay.prototype.rebuildForceModel = function () {
     let circle_width = Math.abs(p2.lng() - p1.lng());
     let circle_height = Math.abs(p2.lat() - p1.lat());
     p1 = point2LatLng(0,0,projection,bounds,zoom);
-    p2 = point2LatLng(170,90,projection,bounds,zoom);
+    p2 = point2LatLng(210,85,projection,bounds,zoom);
     let pop_width = Math.abs(p2.lng() - p1.lng());
     let pop_height = Math.abs(p2.lat() - p1.lat());
 
@@ -2483,7 +3099,10 @@ SVGOverlay.prototype.rebuildForceModel = function () {
                     y : centroid[0] - pop_height/2.0 + Math.random()*0.01-0.005,
                     width : pop_width,
                     height : pop_height,
+                    l_x : centroid[1]-circle_width,
+                    l_y : centroid[0]-circle_width,
                     fixed : true,
+                    go_left : Math.random() > 0.5,
                     node_id : node.id,
                     node_ref : node};
         let l = {source : fn,
@@ -2527,20 +3146,23 @@ SVGOverlay.prototype.rebuildForceModel = function () {
 
     FORCE_MODEL = d3.forceSimulation()
                      //.alphaDecay(0.1)
-                     .force("repelForce",repelForce)
-                     .force("linkForce",linkForce)
+                     //.force("repelForce",repelForce)
+                     //.force("linkForce",linkForce)
                      //.force("centerForce",centerForce)
                      //.force("boundingForce",boundingForce)
+                     .force("xF",xForce)
+                     .force("yF",yForce)
                      .force("collideForce",collideForce)
-                     .on("tick", this.forceTick.bind(this))
-                     .nodes(force_nodes); //must be called whenever we have new nodes
-    FORCE_MODEL.restart();
+                     //.on("tick", this.forceTick.bind(this))
+                     .nodes(force_nodes)
+                     .stop(); //must be called whenever we have new nodes
+    //FORCE_MODEL.restart();
 
-    this.iterateForceAndUpdatePopups();
+    this.iterateForceAndUpdatePopups(false);
 };
 
 
-SVGOverlay.prototype.iterateForceAndUpdatePopups = function () {
+SVGOverlay.prototype.iterateForceAndUpdatePopups = function (animate) {
     console.log("iterate");
 
     //record previous positions for nodes
@@ -2559,7 +3181,7 @@ SVGOverlay.prototype.iterateForceAndUpdatePopups = function () {
         FORCE_MODEL.alpha(1);
 
         let iters = 0;
-        while(iters < 200) {
+        while(iters < 10) {
             FORCE_MODEL.tick();
             iters++;
         }
@@ -2568,8 +3190,17 @@ SVGOverlay.prototype.iterateForceAndUpdatePopups = function () {
         //if we're rebuilding, clear out the old popups
         //d3.select("#popoverContainer").selectAll(".popover-wrapper").remove();
         //d3.select("#popoverLines").selectAll("line.edge").remove();
-        this.updatePopoverObjectsFromForce(true, true);
+        this.updatePopoverObjectsFromForce(animate, animate);
 
+    }
+
+
+    //once we've iterated on nodes, freeze them
+    i=force_nodes.length-1;
+    while (i>=0) {
+        force_nodes[i]['fx'] = force_nodes[i].x;
+        force_nodes[i]['fy'] = force_nodes[i].y;
+        i--;
     }
 
 };
@@ -2587,7 +3218,7 @@ SVGOverlay.prototype.addPopoverToSimulation = function (popNode) {
     let circle_width = Math.abs(p2.lng() - p1.lng());
     let circle_height = Math.abs(p2.lat() - p1.lat());
     p1 = point2LatLng(0,0,projection,bounds,zoom);
-    p2 = point2LatLng(170,90,projection,bounds,zoom);
+    p2 = point2LatLng(210,85,projection,bounds,zoom);
     let pop_width = Math.abs(p2.lng() - p1.lng());
     let pop_height = Math.abs(p2.lat() - p1.lat());
 
@@ -2608,7 +3239,10 @@ SVGOverlay.prototype.addPopoverToSimulation = function (popNode) {
                 y : centroid[0] - pop_height/2.0 + Math.random()*0.01-0.005,
                 width : pop_width,
                 height : pop_height,
+                l_x : centroid[1]-circle_width,
+                l_y : centroid[0]-circle_width,
                 fixed : true,
+                go_left : Math.random() > 0.5,
                 node_id : popNode.id,
                 node_ref : popNode};
     let l = {source : fn,
@@ -2649,6 +3283,7 @@ SVGOverlay.prototype.removePopoverFromSimulation = function (popNode) {
 
 
 SVGOverlay.prototype.updatePopoverObjectsFromForce = function (animateAddRem, animateMove) {
+    animateAddRem = false;
 
     //use enter/exit to create and destroy popupwrappers and links
     var projection = this.getProjection();
@@ -2659,7 +3294,9 @@ SVGOverlay.prototype.updatePopoverObjectsFromForce = function (animateAddRem, an
     //add
     popoverContainer.selectAll(".popover-wrapper").data(pop).enter()
                         .append("div").attr("class", "popover-wrapper")
-                                      .attr("placed", "f").each( function(d,i) {
+                                      .attr("placed", "f")
+                                      .attr("node_id", function(d) {return d.node_ref.id;})
+                                      .each( function(d,i) {
 
                             OVERLAY.buildPopover(d.node_ref, projection, this, true);
                             if (animateAddRem) {
@@ -2701,7 +3338,6 @@ SVGOverlay.prototype.updatePopoverObjectsFromForce = function (animateAddRem, an
         //update content
         OVERLAY.updateNotePopoverContent(d.node_ref, this);
 
-
         //popover loc
         let old_latLng = new google.maps.LatLng(d.prev_y,d.prev_x);
         let old_upperLeft = projection.fromLatLngToContainerPixel(old_latLng);
@@ -2709,29 +3345,51 @@ SVGOverlay.prototype.updatePopoverObjectsFromForce = function (animateAddRem, an
         let old_lowerRight = projection.fromLatLngToContainerPixel(old_heiWid);
 
         //record popover element into force_node so links can use it
-        d['popover_old_upperLeft'] = old_upperLeft;
-        d['popover_old_lowerRight'] = old_lowerRight;
+        //d['popover_old_upperLeft'] = old_upperLeft;
+        //d['popover_old_lowerRight'] = old_lowerRight;
 
         //popover loc
         let latLng = new google.maps.LatLng(d.y,d.x);
         let upperLeft = projection.fromLatLngToContainerPixel(latLng);
         let heiWid = new google.maps.LatLng(d.y+d.height,d.x+d.width);
         let lowerRight = projection.fromLatLngToContainerPixel(heiWid);
+        let width = $(this).find(".infobox").outerWidth();
+        let height = $(this).find(".infobox").outerHeight();
+        let screenwidth = $(this).parent().attr("width");
+        let screenheight = $(this).parent().attr("height");
+
+        //correct that lowerRight is actually the top (negative lon) HACK - probably depends on hemisphere
+        let pos = {x: upperLeft.x, y: lowerRight.y};
+
+        //clamp the position to the edge of the screen
+        if (pos.x < 0) {
+            pos.x = 0;
+        }
+        if (pos.y < 0) {
+            pos.y = 0;
+        }
+        if (pos.x + width > screenwidth) {
+            pos.x = screenwidth - width;
+        }
+        if (pos.y + height > screenheight) {
+            pos.y = screenheight - height;
+        }
+
 
         //record popover element into force_node so links can use it
-        d['popover_upperLeft'] = upperLeft;
-        d['popover_lowerRight'] = lowerRight;
-        d['popover_width'] = $(this).find(".infobox").outerWidth();
-        d['popover_height'] = $(this).find(".infobox").outerHeight();
+        d['popover_upperLeft'] = pos;
+        d['popover_width'] = width;
+        d['popover_height'] = height;
+        d['popover_old_upperLeft'] = {x: old_upperLeft.x, y: old_lowerRight.y};
 
         if (animateMove) { //marker if popover never placed before
 
             $(this).find('.popover')
                     .css({top : old_lowerRight.y, left : old_upperLeft.x})
-                    .velocity({top : lowerRight.y, left : upperLeft.x}, 1500, "swing");
+                    .velocity({top : pos.y, left : pos.x}, 500, "swing");
         }
         else {
-            d3.select(this).select(".popover").style("top", lowerRight.y+"px").style("left", upperLeft.x+"px");
+            d3.select(this).select(".popover").style("top", pos.y+"px").style("left", pos.x+"px");
         }
         d3.select(this).attr("placed","t");
 
@@ -2745,23 +3403,23 @@ SVGOverlay.prototype.updatePopoverObjectsFromForce = function (animateAddRem, an
 
         //even if used a different corner in the past, mark old_ to whatever current corner is
         let old_targetX = d.target.popover_old_upperLeft.x + 3;
-        let old_targetY = d.target.popover_old_lowerRight.y + 3;
+        let old_targetY = d.target.popover_old_upperLeft.y + 3;
         let targetX = d.target.popover_upperLeft.x + 3;
         if (Math.abs(source2d.x - d.target.popover_upperLeft.x - d.target.popover_width + 3) < Math.abs(source2d.x-targetX)) {
             targetX = d.target.popover_upperLeft.x + d.target.popover_width - 3;
             old_targetX = d.target.popover_old_upperLeft.x + d.target.popover_width - 3;
         }
-        let targetY = d.target.popover_lowerRight.y + 3;
-        if (Math.abs(source2d.y - d.target.popover_lowerRight.y - d.target.popover_height + 3) < Math.abs(source2d.y-targetY)) {
-            targetY = d.target.popover_lowerRight.y + d.target.popover_height - 3;
-            old_targetY = d.target.popover_old_lowerRight.y + d.target.popover_height - 3;
+        let targetY = d.target.popover_upperLeft.y + 3;
+        if (Math.abs(source2d.y - d.target.popover_upperLeft.y - d.target.popover_height + 3) < Math.abs(source2d.y-targetY)) {
+            targetY = d.target.popover_upperLeft.y + d.target.popover_height - 3;
+            old_targetY = d.target.popover_old_upperLeft.y + d.target.popover_height - 3;
         }
 
         d3.select(this).attr("x1", source2d.x - 8)
                        .attr("y1", source2d.y - 8);
         if (animateMove) { //marker if popover never placed before
             $(this).attr({x2 : old_targetX, y2 : old_targetY})
-                   .velocity({x2 : targetX, y2 : targetY}, 1500, "swing");
+                   .velocity({x2 : targetX, y2 : targetY}, 500, "swing");
 
         }
         else {
@@ -2903,112 +3561,6 @@ SVGOverlay.prototype.forceTick = function () {
 
 
 
-
-
-
-
-
-
-SVGOverlay.prototype.updateRegionView = function (bounds, viewSize, viewSizeChanged) {
-
-    //agnostic to any zoom/pan level, just updates according to standard heuristics
-
-    //mark circle elements for singletons
-    var single = this.slicedNodes.filter(function(d) { return (d.data_rows.length < 2) &&
-                                                              (d.isOnScreen); });
-
-    this.drawSingletons(single, bounds, viewSize, viewSizeChanged);
-
-    //mark path elements for groups
-    let over = this.slicedNodes.filter(function(d) { return (d.data_rows.length >= 2) &&
-                                                            (d.isOnScreen); });
-
-    this.drawPaths(over, bounds, viewSize, viewSizeChanged);
-
-
-    //labels for paths
-    this.drawPathLabels(over, bounds, viewSize, viewSizeChanged);
-
-
-    //quantitative bins
-    //CANCEL FOR NOW
-    //this.drawQuantBins(over, bounds, viewSize, viewSizeChanged);
-
-    //just move around the recommended circle
-    this.repositionRecommended(bounds);
-
-/*
-    var svg = d3.select("#region_overlay");
-        var projection = this.getProjection();
-    var debugLayer = svg.selectAll("circle.debug")
-                        .data(LEAF_NODES);
-    debugLayer.enter().append("circle")
-            .attr("class", "debug")
-            .attr('fill', '#888')
-            .attr('stroke', '#444')
-            .attr('stroke-width', '1px')
-            .attr('opacity', '0.5')
-            .attr('r', 2);
-    debugLayer.exit().remove();
-
-    d3.select("#region_overlay").selectAll("circle.debug").each( function (d,i) {
-        let proj = d.getCenterDProj(LATVAL, LONVAL, projection);
-        d3.select(this).attr('cx',proj[0])
-                       .attr('cy',proj[1]);
-    });*/
-
-
-
-
-};
-
-SVGOverlay.prototype.onMouseClick = function (e) {
-
-    let projection = this.getProjection();
-    let loc = projection.fromLatLngToContainerPixel(e.latLng);
-    console.log(e.latLng.lat(),e.latLng.lng());
-    let x = Math.round(Math.abs(loc.x));
-    let y= Math.round(Math.abs(loc.y));
-
-    let scores = scoreNodes(DATASET, this.slicedNodes);
-
-    rankLeaves(LEAF_NODES, this.map.getBounds());
-
-    d3.selectAll("path.group").each(function(d,i) {
-
-
-        if (d.checkContainment(LATVAL,LONVAL,[e.latLng.lat(),e.latLng.lng()])) {
-
-            let lst = d3.select("#datadump").html("").append("ul");
-            let score = scores[d.id];
-
-            //console.log(score);
-            for (let col of VALID_NUM_COLUMNS) {
-                lst.append("li").text(col+": "+score[col]);
-            }
-            for (let col of VALID_NOM_COLUMNS) {
-                for (let term in score[col]) {
-                    if (score[col][term] > 0.1) {
-                        lst.append("li").text(term+": "+score[col][term]);
-                    }
-                }
-            }
-
-
-        }
-
-
-    });
-
-
-
-};
-
-
-
-
-//xyzzy
-
 var LEAF_RANKINGS = [];
 var SHOW_NODES = [];
 
@@ -3020,7 +3572,7 @@ SVGOverlay.prototype.buildRankingSlider = function ( ) {
         defaultValues: {min:1,max:5}
 
     });
-    $("#rankingSlider").bind("valuesChanged", this.rankingSliderChanged.bind(this));
+    $("#rankingSlider").bind("valuesChanging", this.rankingSliderChanged.bind(this));
 
     this.computeNewLeafRankings();
     this.updateRecommendedPopovers();
@@ -3090,7 +3642,7 @@ SVGOverlay.prototype.updateRecommendedPopovers = function () {
     }
 
     if (changeFound) {
-        this.iterateForceAndUpdatePopups();
+        this.iterateForceAndUpdatePopups(false);
     }
     //MODIFY THE FORCE MODEL AS NEED BE
 };
@@ -3142,7 +3694,7 @@ SVGOverlay.prototype.fillNotePopover = function( node, projection, wrapperElemen
     let neighborhood = node.data_src[row]['neighborhood'];
     let categories = node.data_src[row]['categories'];
     let rating = node.data_src[row]['rating'];
-    let ratingImg = rating.toFixed(1) + '.gif';
+    let ratingImg = rating.toFixed(1) + '.png';
     let url = node.data_src[row]['url'];
     let highlights = node.data_src[row]['highlights'];
     let num_reviews = node.data_src[row]['num_reviews'];
@@ -3160,7 +3712,8 @@ SVGOverlay.prototype.fillNotePopover = function( node, projection, wrapperElemen
 
 
     headerContainer.append("div").attr("class", "ratings");
-    headerContainer.select('.ratings').append("span").text(rating+" stars");
+    headerContainer.select('.ratings').append("span").append("img")
+        .attr("src", ratingImg);
 
     //small box ends here
 
@@ -3333,7 +3886,7 @@ SVGOverlay.prototype.updateNotePopoverContent = function( node, wrapperElement )
     let neighborhood = node.data_src[row]['neighborhood'];
     let categories = node.data_src[row]['categories'];
     let rating = node.data_src[row]['rating'];
-    let ratingImg = rating.toFixed(1) + '.gif';
+    let ratingImg = rating.toFixed(1) + '.png';
     let url = node.data_src[row]['url'];
     let highlights = node.data_src[row]['highlights'];
     let num_reviews = node.data_src[row]['num_reviews'];
@@ -3347,6 +3900,7 @@ SVGOverlay.prototype.updateNotePopoverContent = function( node, wrapperElement )
     let headerContainer = infobox.select(".header");
     headerContainer.select("span.name").text(name);
     headerContainer.select("span.ratings").text(rating+" stars");
+    headerContainer.select('div.ratings img').attr("src", ratingImg);
 
     let $popoverContainer = $(containerElement.node());
     let contentContainer = containerElement.select(".expandableContent");
@@ -3633,314 +4187,137 @@ SVGOverlay.prototype.fillLeafPopover = function( node, projection, wrapperElemen
 
 };
 
-SVGOverlay.prototype.resetAllPopupPositions = function ( projection ) {
-    d3.selectAll('.popover-wrapper').each(function() {
-        let containerElement = d3.select(this).select('.popover');
-        let lineElement = d3.select(this).select('.popover-line');
-        OVERLAY.resetPopupPosition( containerElement, lineElement, projection );
-    });
-};
-
-SVGOverlay.prototype.resetPopupPosition = function ( containerElement, lineElement, projection) {
-    //console.log(containerElement);
-    //console.log(lineElement.data());
-    let node = lineElement.data()[0];
-    let $popoverContainer = $(containerElement.node());
-
-    //get position for start of popover
-    let centroid = node.getHullCentroid(LATVAL, LONVAL);
-    let latLng = new google.maps.LatLng(centroid[0],centroid[1]);
-    let proj = projection.fromLatLngToContainerPixel(latLng);
-
-    let offset = $("#popoverContainer").offset();
-    //introduce some randomness so layout algorithm has a push direction
-    let top = proj.y - offset.left - ($popoverContainer.height() / 2.0) + (Math.random() < 0.5 ? (Math.random()*-20)-10 : (Math.random()*20)+10);
-    let left = proj.x - offset.top - ($popoverContainer.width() / 2.0) + (Math.random() < 0.5 ? (Math.random()*-20)-10 : (Math.random()*20)+10);
-
-    containerElement.style("left", parseInt(left)+'px');
-    containerElement.style("top", parseInt(top)+'px');
-
-    this.updateLine(lineElement, proj.x-offset.left, proj.y-offset.top, left, top);
-};
-
 
 SVGOverlay.prototype.fillGroupPopover = function ( node, containerElement ) {
 
 
 };
 
-SVGOverlay.prototype.updateLine = function (d3lineDiv, x1,y1, x2,y2){
-    var length = Math.sqrt((x1-x2)*(x1-x2) + (y1-y2)*(y1-y2));
-    var angle  = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
-    var transform = 'rotate('+angle+'deg)';
-
-    d3lineDiv.style('transform',transform)
-           .style("top",y1 + 'px')
-           .style("left",x1 + 'px')
-           .style("width",length + 'px');
-};
 
 
-SVGOverlay.prototype.layoutPopups = function ( projection ) {
 
-    let PAD_RECT = 12;
-    let REPEL_WEIGHT = 40.0;
-    let POPOVER_REPEL_WEIGHT = 90.0;
-    let STEP_SIZE = 0.5;
+var CIRCLE_SIZE = 3;
+var BOX_SIZE = 3; //(usually 2x circle radius)
+var TILE_SIZE = 400; //px
 
-    let CENTER_PULL_FORCE = 10.0;
+SVGOverlay.prototype.fetchOnlyOnscreenTilesAndRender = function (tiles, screenBounds, forceRender, renderParams) {
 
-    //clear out any translates on the popover container
+    //console.log("RENDER")
+    //console.log(tiles)
 
-    //get list of dirty zones from SVG bounding boxes
-    let dirtyZones = [];
-    let popovers = [];
-    let ident = 0;
+    let width = d3.select(this.svg).attr('width');
+    let height = d3.select(this.svg).attr('height');
+    let projection = this.getProjection();
 
-    d3.selectAll('.popover').each(function() {
-        let bb = this.getBoundingClientRect();
-        popovers.push({
-            left : bb.left-PAD_RECT,
-            right : bb.right+(2*PAD_RECT),
-            top : bb.top-PAD_RECT,
-            bottom : bb.bottom+(2*PAD_RECT),
-            center_x : bb.left + (bb.width / 2.0),
-            center_y : bb.top + (bb.height / 2.0),
-            sleep : parseInt(d3.select(this.parentNode).attr("should_layout")) === 0,
-            ident : ident,
-            popover : this
-        });
-        /*
-        let $pop = $(this);
+    let latMin = screenBounds.getSouthWest().lat();
+    let latMax = screenBounds.getNorthEast().lat();
+    let lonMin = screenBounds.getSouthWest().lng();
+    let lonMax = screenBounds.getNorthEast().lng();
 
-        let l = $pop.offset().left;
-        let r = $pop.offset().left + $pop.width();
-        let t = $pop.offset().top;
-        let b = $pop.offset().top + $pop.height();
-
-        popovers.push({
-            left : l-PAD_RECT,console.log('overlap '+diff_len);
-            right : r+(2*PAD_RECT),
-            top : t-PAD_RECT,
-            bottom : b+(2*PAD_RECT),
-            center_x : (l + r) / 2.0,
-            center_y : (t + b) / 2.0,
-            sleep : false,
-            ident : ident,
-            popover : this
-        });
-        */
-        ident++;
-    });
-    if (popovers.length === 0) { //QUIT IF NO POPUPS TO LAYOUT
-        return null;
-    }
-
-    d3.selectAll('path.group').each(function() {
-        let bb = this.getBBox();
-        dirtyZones.push({
-            left : bb.x,
-            top : bb.y,
-            bottom : bb.y+bb.height,
-            right : bb.x+bb.width,
-            center_x : bb.x + (bb.width / 2.0),
-            center_y : bb.y + (bb.height / 2.0),
-            ident : ident
-        });
-        ident++;
-    });
-    d3.selectAll('circle.singleton').each(function() {
-        let bb = this.getBBox();
-        dirtyZones.push({
-            left : bb.x,
-            top : bb.y,
-            bottom : bb.y+bb.height,
-            right : bb.x+bb.width,
-            center_x : bb.x + (bb.width / 2.0),
-            center_y : bb.y + (bb.height / 2.0),
-            ident : ident
-        });
-        ident++;
-    });
-
-    //console.log(dirtyZones);
-    //console.log(popovers);
-    let left_x = 0;
-    let right_x = OVERLAY.width;
-    let top_y = 0;
-    let bottom_y = OVERLAY.height;
-
-    let screen_center_x = right_x / 2.0; //subtract out left and top if not 0
-    let screen_center_y = bottom_y / 2.0;
-
-    //iterate until we have a solution
-    //bound the popups to padded edge of screen, sleep them if that happens
-    let separated = true;
-    let iterations = 0;
-    do {
-        separated = true;
-        let i=popovers.length-1;
-        while (i>=0) {
-            let pop = popovers[i];
-            i--;
-            if (!pop.sleep) {
-                let velocity = new THREE.Vector2(0,0);
-
-                let j=dirtyZones.length-1;
-                while (j>=0) {
-                    let zone = dirtyZones[j];
-                    j--;
-                    //repulse from overlaps
-                    if (zone.ident != pop.ident && //not same entity
-                        !(pop.left >= zone.right || //overlap
-                           pop.right <= zone.left ||
-                           pop.top >= zone.bottom ||
-                           pop.bottom <= zone.top)
-                     ) {
-                        let diff = new THREE.Vector2(pop.center_x - zone.center_x, pop.center_y - zone.center_y);
-                        let diff_len = diff.lengthSq();
-
-                        if (diff_len > 0.0) {
-                            let scale = REPEL_WEIGHT / diff_len;
-
-                            velocity.add(diff.normalize().multiplyScalar(scale));
-                        }
-                    }
-
-                    //pull towards own node if outside it
-                    else if (zone.ident === pop.ident &&
-                        (pop.left >= zone.right || //no overlap
-                           pop.right <= zone.left ||
-                           pop.top >= zone.bottom ||
-                           pop.bottom <= zone.top)) {
-                       let diff = new THREE.Vector2(pop.center_x - zone.center_x, pop.center_y - zone.center_y);
-                       let diff_len = diff.lengthSq();
-
-                       if (diff_len > 0.0) {
-                           let scale = -CENTER_PULL_FORCE / diff_len;
-
-                           velocity.add(diff.normalize().multiplyScalar(scale));
-                       }
-
-                   }
-                }
-
-                j=popovers.length-1;
-                while (j>=0) {
-                    let zone = popovers[j];
-                    j--;
-                    if (zone.ident != pop.ident && //not same entity
-                        !(pop.left >= zone.right || //overlap
-                           pop.right <= zone.left ||
-                           pop.top >= zone.bottom ||
-                           pop.bottom <= zone.top)
-                     ) {
-
-                        let diff = new THREE.Vector2(pop.center_x - zone.center_x, pop.center_y - zone.center_y);
-                        let diff_len = diff.lengthSq();
-
-                        if (diff_len > 0.0) {
-                            let scale = REPEL_WEIGHT / diff_len;
-
-                            velocity.add(diff.normalize().multiplyScalar(scale));
-                        }
-                    }
-                }
-
-
-                //console.log(velocity);
-                if (velocity.lengthSq() > 0) {
-                    separated = false;
-                    //compute movement
-                    velocity.normalize().multiplyScalar(STEP_SIZE * 20.0);
-                                //console.log(velocity);
-                    //update pos
-                    pop['left'] = pop['left'] + velocity.x;
-                    pop['right'] = pop['right'] + velocity.x;
-                    pop['top'] = pop['top'] + velocity.y;
-                    pop['bottom'] = pop['bottom'] + velocity.y;
-                    //clamp to viewport
-                    if (pop.left < left_x) {
-                        pop['right'] = pop['right'] - (left_x - pop['left']);
-                        pop['left'] = left_x;
-                    }
-                    if (pop.right > right_x) {
-                        pop['left'] = pop['left'] + (right_x - pop['right']);
-                        pop['right'] = right_x;
-                    }
-                    if (pop.top < top_y) {
-                        pop['bottom'] = pop['bottom'] - (top_y - pop['top']);
-                        pop['top'] = top_y;
-                    }
-                    if (pop.bottom > bottom_y) {
-                        pop['top'] = pop['top'] + (bottom_y - pop['bottom']);
-                        pop['bottom'] = bottom_y;
-                    }
-                    //update center
-                    pop['center_x'] = (pop['left'] + pop['right'] ) / 2.0;
-                    pop['center_y'] = (pop['top'] + pop['bottom'] ) / 2.0;
-                }
-            }
-
+    function isPartiallyInBounds(x, y) {
+        if ((x >= 0) && (x <= width) &&
+           (y >= 0) && (y <= height)) {
+            return true;
+           }
+        else {
+            return false;
         }
-        iterations++;
     }
-    while (!separated && iterations < 10000);
 
-    console.log('iter: '+iterations);
-    //console.log(popovers);
+    let tile_sort = {};
 
-    //reposition popovers
-    let i=popovers.length-1;
+    let i=tiles.length-1;
     while (i>=0) {
-        let pop = popovers[i];
+        let tile = tiles[i];
+
+        let latLng = new google.maps.LatLng(tile.upperLeft.lat, tile.upperLeft.lon);
+        let proj = projection.fromLatLngToContainerPixel(latLng);
+
+        if (isPartiallyInBounds(proj.x, proj.y) ||
+            isPartiallyInBounds(proj.x+TILE_SIZE, proj.y) ||
+            isPartiallyInBounds(proj.x, proj.y+TILE_SIZE) ||
+            isPartiallyInBounds(proj.x+TILE_SIZE, proj.y+TILE_SIZE)) {
+
+            tile.proj = proj;
+
+            if (!(tile.x in tile_sort)) {
+                tile_sort[tile.x] = {};
+            }
+
+            if (!(tile.y in tile_sort[tile.x])) {
+                tile_sort[tile.x][tile.y] = tile;
+                tile_sort[tile.x][tile.y].node_id = [parseInt(tile_sort[tile.x][tile.y].node_id)];
+                tile_sort[tile.x][tile.y].node_sum = parseInt(tile_sort[tile.x][tile.y].node_id);
+            }
+            else {
+                let k=tile.circles.length-1;
+                tile_sort[tile.x][tile.y].node_sum += parseInt(tile.node_id);
+                tile_sort[tile.x][tile.y].node_id.push(tile.node_id);
+                while (k>=0) {
+                    tile_sort[tile.x][tile.y].circles.push(tile.circles[k]);
+                    k--;
+                }
+            }
+
+
+        }
         i--;
-        if (!pop.sleep) {
-            d3.select(pop.popover).style("top", parseInt(pop.top + PAD_RECT)+'px')
-                                  .style("left", parseInt(pop.left + PAD_RECT)+'px');
+
+
+    }
+
+
+    let final_tiles = [];
+    for (let x_ind in tile_sort) {
+        for (let y_ind in tile_sort[x_ind]) {
+            final_tiles.push(tile_sort[x_ind][y_ind]);
+            this.renderTile(tile_sort[x_ind][y_ind], forceRender, renderParams);
         }
     }
 
-    let offset = $("#popoverContainer").offset();
+    return final_tiles;
 
-    //reposition lines
-    let INSET = 5; //inset the line into the popover just to be careful
-    d3.selectAll(".popover-line").each(function() {
-        let $pop = $(this.parentNode).find('.popover');
 
-        let node = d3.select(this).data()[0];
+};
 
-        let centroid = node.getHullCentroid(LATVAL, LONVAL);
-        //console.log(centroid);
-        let latLng = new google.maps.LatLng(centroid[0],centroid[1]);
-        let proj = projection.fromLatLngToContainerPixel(latLng);
-        let start = new THREE.Vector2(proj.x-offset.left, proj.y-offset.top);
 
-        //HACK BECAUSE SVG IS SLIGHTLY LOWERED
-        let l = $pop.position().left+INSET;
-        let r = $pop.position().left + $pop.width()-INSET;
-        let t = $pop.position().top+INSET;
-        let b = $pop.position().top + $pop.height()-INSET;
+SVGOverlay.prototype.renderTile = function (tile, forceRender, renderParams) {
 
-        //find closest corner
-        let test = [new THREE.Vector2(l,t),
-                    new THREE.Vector2(l,b),
-                    new THREE.Vector2(r,t),
-                    new THREE.Vector2(r,b)];
-        let bestLenSq = 100000000;
-        let bestPoint = null;
-        let i=0;
-        while(i<4) {
-            let dist = start.distanceToSquared(test[i]);
-            if (dist < bestLenSq) {
-                bestPoint = test[i];
-                bestLenSq = dist;
-            }
-            i++;
+    let colorForNode = function (n) {
+        let v = DESC_STATS['rating'].scale(DATASET[n]['rating']);
+        if (v < 0.5) {
+            return d3.interpolateLab("#d8342c","#f2f2f2","#4a76b5")(v*2.0);
         }
-        OVERLAY.updateLine(d3.select(this),bestPoint.x,bestPoint.y,start.x,start.y);
+        else {
+            return d3.interpolateLab("#f2f2f2","#4a76b5")((v-0.5)*2.0);
+        }
+    };
 
-    });
+    if (!('canvas' in tile) || forceRender) {
+
+        let offscreenCanvas = document.createElement('canvas');
+        //create offscreen draw, note padding by circle size in case on edges
+        offscreenCanvas.width = TILE_SIZE+(tile.overflow*2);
+        offscreenCanvas.height = TILE_SIZE+(tile.overflow*2);
+
+        let ctx=offscreenCanvas.getContext("2d");
+
+        let j=tile.circles.length-1;
+        while (j>=0) {
+            let c=tile.circles[j];
+            ctx.fillStyle = colorForNode(c.data_row);
+            ctx.beginPath();
+            ctx.arc(Math.floor(c.ox+tile.overflow),Math.floor(c.oy+tile.overflow),CIRCLE_SIZE,0,2*Math.PI);
+            ctx.stroke();
+            ctx.fill();
+
+            j--;
+        }
+
+        tile['canvas'] = ctx.getImageData(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+
+
+    }
 
 
 };
@@ -3949,13 +4326,264 @@ SVGOverlay.prototype.layoutPopups = function ( projection ) {
 
 
 
+SVGOverlay.prototype.getCanvasTilesForClustersAtCurrentZoom = function (nodes) {
+
+    //takes in a list of nodes; for a given zoom level, either pulls from cache or sims circles
+    // sorts the resulting circles into standard tiles
+    //returns a complete set of (overlapping) tiles for all nodes in the list regardless of onscreen
+
+    let projection = this.map.getProjection();
+    let projectionScreen = this.getProjection();
+    let bounds = this.map.getBounds();
+    let zoom = this.map.getZoom();
+
+    var p = point2LatLng(TILE_SIZE,TILE_SIZE,projection,bounds,zoom);
+    this.TILE_LAT = p.lat();
+    this.TILE_LON = p.lng();
+    console.log(p);
+
+    //composit any new tilesets for given nodes
+    let i = nodes.length - 1;
+    while (i>=0) {
+        let node = nodes[i];
+
+        if (!(zoom in this.CANVAS_TILE_DB)) {
+            this.CANVAS_TILE_DB[zoom] = {};
+        }
+        if (!(node.id in this.CANVAS_TILE_DB[zoom])) {
+            let bins = forceNodesForCluster(nodes[i], projectionScreen);
+
+            let sim = simulateWithBins(bins);
+
+            let node_tile_map = {};
+
+            let j=sim.c.length-1;
+            while (j>=0) {
+                //sort them into tiles
+                let circle = sim.c[j];
+                circle['cluster'] = node;
+
+                let x_ind = Math.floor(circle.x / TILE_SIZE);
+                let y_ind = Math.floor(circle.y / TILE_SIZE);
+                let corner = point2LatLng(x_ind*TILE_SIZE,y_ind*TILE_SIZE,projection,bounds,zoom);
+                let corner2 = point2LatLng((x_ind-1)*TILE_SIZE,(y_ind+1)*TILE_SIZE,projection,bounds,zoom);
+
+                if (!(zoom in node_tile_map)) {
+                    node_tile_map[zoom] = {};
+                }
+                if (!(x_ind in node_tile_map[zoom])) {
+                    node_tile_map[zoom][x_ind] = {};
+                }
+                if (!(y_ind in node_tile_map[zoom][x_ind])) {
+                    let tile = { x: x_ind, //x,y,zoom make up unique identifier for tile
+                                 y: y_ind,
+                                 zoom: zoom,
+                                 node_id: node.id,
+                                 upperLeft: {   x: x_ind*TILE_SIZE,
+                                                y: y_ind*TILE_SIZE,
+                                                lat: corner.lat(),
+                                                lon: corner.lng()},
+                                 lowerRight: {  x: (x_ind+1)*TILE_SIZE,
+                                                y: (y_ind+1)*TILE_SIZE,
+                                                lat: corner2.lat(),
+                                                lon: corner2.lng()},
+                                 tile_sz: TILE_SIZE,
+                                 overflow: CIRCLE_SIZE,
+                                 circles: []
+                             };
+
+                    node_tile_map[zoom][x_ind][y_ind] = tile;
+                }
+
+                //create offset positions for the circles
+                circle['ox'] = circle.x - (x_ind*TILE_SIZE);
+                circle['oy'] = circle.y - (y_ind*TILE_SIZE);
+
+                node_tile_map[zoom][x_ind][y_ind].circles.push(circle);
+
+                j--;
+            }
+
+            this.CANVAS_TILE_DB[zoom][node.id] = node_tile_map;
+
+        }
 
 
+        i--;
+    }
+
+    let all_tiles = [];
+    i = nodes.length - 1;
+    while (i>=0) {
+        let node = nodes[i];
+        let node_tile_map = this.CANVAS_TILE_DB[zoom][node.id];
+
+        for (let x_ind in node_tile_map[zoom]) {
+            for (let y_ind in node_tile_map[zoom][x_ind]) {
+                /*if (!(x_ind in all_tiles_map)) {
+                    all_tiles_map[x_ind] = {};
+                }
+                if (!(y_ind in all_tiles_map[x_ind])) {
+                    all_tiles_map[x_ind][y_ind] = [];
+                }
+
+                all_tiles_map[x_ind][y_ind].push(node_tile_map[zoom][x_ind][y_ind]);*/
+                all_tiles.push(node_tile_map[zoom][x_ind][y_ind]);
+
+            }
+        }
+        i--;
+    }
+
+    return all_tiles;
+};
+
+
+
+
+function createCanvasForCluster(node, containerElement, projection) {
+
+
+
+    let bins = forceNodesForCluster(node, projection);
+
+    let sim = simulateWithBins(bins);
+
+    let canvas = d3.select(containerElement)
+                    .style("position", "absolute")
+                    .style("left", (sim.offset.x-8)+"px")
+                    .style("top", (sim.offset.y-8)+"px")
+                    .append("canvas")
+                    .attr('width', sim.width)
+                    .attr('height', sim.height);
+
+    drawForceCirclesOnto(sim.c, canvas.node(), sim.offset);
+
+}
+
+
+
+
+function forceNodesForCluster(node, projection) {
+
+    let bins = {};
+    let i=node.data_rows.length-1;
+    while (i>=0) {
+        let n = node.data_rows[i];
+
+        let latLng = new google.maps.LatLng(node.data_src[n][LATVAL], node.data_src[n][LONVAL]);
+        let proj = projection.fromLatLngToContainerPixel(latLng);
+
+        let x_ind = Math.floor(proj.x / BOX_SIZE);
+        let y_ind = Math.floor(proj.y / BOX_SIZE);
+
+
+        if (!(x_ind in bins)) {
+            bins[x_ind] = {};
+        }
+        if (!(y_ind in bins[x_ind])) {
+            bins[x_ind][y_ind] = [];
+        }
+
+        bins[x_ind][y_ind].push({
+            x: proj.x,
+            dx: proj.x,
+            y: proj.y,
+            dy: proj.y,
+            data_row: n
+        });
+
+        i--;
+    }
+
+    return bins;
+
+}
+
+function simulateWithBins(bins) { //add heuristic here to pick correct bins
+
+    let circles = [];
+    let x_min = Number.MAX_VALUE;
+    let x_max = Number.MIN_VALUE;
+    let y_min = Number.MAX_VALUE;
+    let y_max = Number.MIN_VALUE;
+    for (let x in bins) {
+        for (let y in bins[x]) {
+
+            //take off the top for now
+            let n = bins[x][y].pop();
+            //n['r'] = CIRCLE_SIZE;
+
+            x_min = Math.min(x_min, n.x);
+            x_max = Math.max(x_max, n.x);
+            y_min = Math.min(y_min, n.y);
+            y_max = Math.max(y_max, n.y);
+
+            circles.push(n);
+
+        }
+    }
+
+
+    let model = d3.forceSimulation()
+                     //.alphaDecay(0.1)
+                     //.force("fx",d3.forceX(function(d) {return(d.dx);}).strength(0.05))
+                     //.force("fy",d3.forceY(function(d) {return(d.dy);}).strength(0.05))
+                     .force("collideForce",d3.forceCollide(function() {return CIRCLE_SIZE;}).strength(1).iterations(5))
+                     .nodes(circles)
+                     .stop();
+
+    let iters = 0;
+    while(iters < 10) {
+        model.tick();
+        iters++;
+    }
+    model.stop();
+
+    return {c: circles,
+            offset: {x: x_min-8, y: y_min-8},
+            width: x_max-x_min+16,
+            height: y_max-y_min+16};
+
+}
+
+function drawForceCirclesOnto(circles, canvas, offset) {
+
+    let i=circles.length-1;
+    while (i>=0) {
+        let c=circles[i];
+        let ctx=canvas.getContext("2d");
+        ctx.beginPath();
+        ctx.arc(parseInt(c.x-offset.x),parseInt(c.y-offset.y),CIRCLE_SIZE,0,2*Math.PI);
+        ctx.stroke();
+
+        i--;
+    }
+
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+//0-0-0-0-0-0-0-0-0-0-0-0-0-0--READY--0-0-0-0-0-0-0-0-0-0-0-0-0-0
+//-0-0-0-0-0-0-0-0-0-0-0-0-0-0-------0-0-0-0-0-0-0-0-0-0-0-0-0-0-
 
 
 function ready(data) {
 
-    console.log(data);
+    //console.log(data);
 
     DATASET = data;
 
@@ -3991,7 +4619,7 @@ function ready(data) {
         norm_data.push(n);
     }
 
-    console.log(norm_data);
+    //console.log(norm_data);
 
     //CLUSTERING HERE ------------------------------
     var threshold = 0.3; // only combine two clusters with distance less than 14
@@ -4043,7 +4671,7 @@ function ready(data) {
 
     }
     var VIRTUAL_ROOT = new Node(-1, data, [], null, ROOT_NODES, 0);
-    console.log(VIRTUAL_ROOT);
+    //console.log(VIRTUAL_ROOT);
 
 
     //push the LEAF Nodes into a quadtree for faster geo lookups
@@ -4053,7 +4681,8 @@ function ready(data) {
         .addAll(LEAF_NODES);
 
 
-
+    //gather initial stats
+    gatherStats(LEAF_NODES);
 
 
 

@@ -8,6 +8,7 @@
     <link type="text/css" href="main.css" rel="stylesheet">
 
           <script src="https://d3js.org/d3.v4.min.js"></script>
+          <script src="hidpi-canvas.min.js"></script>
         <script src="https://cdn.jsdelivr.net/jquery/3.2.1/jquery.min.js" ></script>
         <script src="https://cdn.jsdelivr.net/jquery.ui/1.11.4/jquery-ui.min.js" ></script>
         <script src="https://cdn.jsdelivr.net/velocity/1.5.0/velocity.min.js" ></script>
@@ -22,8 +23,15 @@
 
     <div id="rankingSliderContainer"><div id="rankingSlider"></div></div>
 
-    <div id="popoverContainer">
+
+    <div id="canvasPositioner">
+      <div id="canvasContainer"></div>
+    </div>
+
+    <div id="popoverPositioner">
+      <div id="popoverContainer">
       <svg id="popoverLines"></svg>
+    </div>
     </div>
     <div id="datadump">testsgfsgdfgfd</div>
 
@@ -52,7 +60,7 @@
 
     <script src="https://maps.googleapis.com/maps/api/js?v=3&amp;libraries=places&amp;key=AIzaSyArRHUze0h8HFegBahyQBe9mx36bT4Aq4w"></script>
 
-    <script src="temp.js"></script>
+    <script src="bundle.js"></script>
 
 </body>
 </html>
