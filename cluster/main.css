@@ -70,6 +70,16 @@ circle.recommended {
   z-index: 3000;
 }
 
+circle.selected {
+  stroke-width: 3px;
+  stroke: #222;
+}
+
+#bubblecursor {
+  fill: rgba(40, 115, 152, 0.3);
+  stroke: none;
+}
+
 path.group {
   opacity: 0.6;
   fill: none;
@@ -84,6 +94,10 @@ path.highlighted {
 
 path.selected {
   stroke: #289cd5;
+}
+
+#tooltips {
+  z-index: 20000;
 }
 
 
@@ -195,6 +209,71 @@ div.tooltip {
   opacity: 0.5;
   z-index: 400;
 }
+
+
+.selection-popover {
+  position: absolute;
+  z-index: 20000;
+  background-color: rgba(30, 80, 120, 0.9);
+  font-size: 0.9em;
+  color: #fff;
+  border-radius: 5px;
+  -moz-border-radius: 5px;
+  -webkit-border-radius: 5px;
+  max-width: 210px;
+}
+
+.selection-popover .infobox {
+  max-height: 72px;
+  padding: 6px 12px;
+  overflow: hidden;
+}
+
+.selection-popover .header {
+  float: left;
+}
+
+.selection-popover .title {
+  overflow: hidden;
+}
+
+.selection-popover .title .name {
+  font-size: 1em;
+  text-decoration: none;
+  font-weight: bold;
+  max-height: 3em;
+}
+
+.selection-popover .infobox .ratings {
+  overflow: hidden;
+}
+
+.selection-popover .details {
+  padding: 12px 12px 0 12px;
+  max-height: 3em;
+}
+
+.selection-popover .infobox .ratings img {
+  height: 12px;
+  margin-top: 4px;
+  padding: 3px;
+  background-color: rgba(255, 255, 255, 0.95);
+}
+
+.selection-popover .infobox .ratings .rank {
+  margin-right: 10px;
+  margin-left: 2px;
+  color: #fff;
+  top: -4px;
+  position: relative;
+}
+
+.selection-popover .explanation {
+  font-size: 0.8em;
+  font-style: italic;
+}
+
+
 
 .note-popover {
   position: absolute;
