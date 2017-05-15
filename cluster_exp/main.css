@@ -56,7 +56,6 @@ body {
 
 circle {
   /*fill: rgba(30, 80, 120, 0.8);*/
-  stroke: #222;
   z-index: 2000;
 }
 
@@ -814,7 +813,7 @@ div.tooltip {
   width: 184px;
   height: 18px;
   border: 1px solid #333;
-  background-image: url(RdBu.png);
+  background-image: url(viridis.png);
   background-repeat: repeat-y;
   background-size: contain;
 }
