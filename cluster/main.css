@@ -47,7 +47,7 @@ body {
   height: 100%;
   width: 280px;
   border-left: 2px solid #888;
-  z-index: 500;
+  z-index: 600;
   background-color: #fff;
 }
 
@@ -58,17 +58,17 @@ body {
 circle {
   /*fill: rgba(30, 80, 120, 0.8);*/
   /*stroke: #222;*/
-  z-index: 2000;
+  z-index: 200;
 }
 
 circle.single {
   fill: rgba(30, 80, 120, 1);
   stroke: #222;
-  z-index: 2000;
+  z-index: 200;
 }
 
 circle.recommended {
-  z-index: 3000;
+  z-index: 300;
 }
 
 circle.selected {
@@ -98,7 +98,7 @@ path.selected {
 }
 
 #tooltips {
-  z-index: 20000;
+  z-index: 300;
 }
 
 
@@ -148,7 +148,7 @@ div.tooltip {
   left: 50px;
   width: 1000px;
   height: 80px;
-  z-index: 5000;
+  z-index: 500;
 }
 
 #canvasPositioner {
@@ -197,7 +197,7 @@ div.tooltip {
   position: absolute;
   top: 0;
   left: 0;
-  z-index: 500;
+  z-index: 300;
   pointer-events: none;
 }
 
@@ -208,12 +208,12 @@ div.tooltip {
   height: 2px;
   background: #000;
   opacity: 0.5;
-  z-index: 400;
+  z-index: 300;
 }
 
 .clusterpop {
   position: absolute;
-  z-index: 15000;
+  z-index: 300;
   max-width: 300px;
   pointer-events: none;
 }
@@ -230,7 +230,7 @@ div.tooltip {
 
 .selection-popover {
   position: absolute;
-  z-index: 20000;
+  z-index: 400;
   background-color: rgba(30, 80, 120, 0.9);
   font-size: 0.9em;
   color: #fff;
@@ -381,7 +381,7 @@ div.tooltip {
 
 .leaf-popover {
   position: absolute;
-  z-index: 999;
+  z-index: 400;
   background-color: #fff;
   border: 2px solid black;
   font-size: 1em;
@@ -667,7 +667,7 @@ div.tooltip {
   height: 100%;
   width: 320px;
   border-right: 2px solid #888;
-  z-index: 500;
+  z-index: 600;
   background-color: #fff;
 }
 
@@ -858,7 +858,7 @@ div.tooltip {
   border: 2px solid #4e505c;
   background-color: #999db3;
   cursor: pointer;
-  z-index: 400
+  z-index: 600;
 }
 
 #filterConfig .collapseButton {
