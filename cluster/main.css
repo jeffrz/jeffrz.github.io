@@ -56,7 +56,7 @@ body {
 
 circle {
   /*fill: rgba(30, 80, 120, 0.8);*/
-  stroke: #222;
+  /*stroke: #222;*/
   z-index: 2000;
 }
 
@@ -210,6 +210,22 @@ div.tooltip {
   z-index: 400;
 }
 
+.clusterpop {
+  position: absolute;
+  z-index: 15000;
+  max-width: 300px;
+  pointer-events: none;
+}
+
+.clusterpop div {
+}
+
+.clusterrow {
+  padding: 3px 8px;
+  background-color: rgba(50, 67, 116, 0.9);
+  font-size: 0.9em;
+  color: #fff;
+}
 
 .selection-popover {
   position: absolute;
@@ -220,11 +236,11 @@ div.tooltip {
   border-radius: 5px;
   -moz-border-radius: 5px;
   -webkit-border-radius: 5px;
-  max-width: 210px;
+  max-width: 230px;
 }
 
 .selection-popover .infobox {
-  max-height: 72px;
+  max-height: 102px;
   padding: 6px 12px;
   overflow: hidden;
 }
@@ -244,8 +260,15 @@ div.tooltip {
   max-height: 3em;
 }
 
-.selection-popover .infobox .ratings {
+.selection-popover .othernodes {
+  text-align: right;
+  font-size: 0.9em;
+  padding-top: 6px;
+}
+
+.selection-popover .ratings {
   overflow: hidden;
+  margin-top: 4px;
 }
 
 .selection-popover .details {
@@ -269,8 +292,15 @@ div.tooltip {
 }
 
 .selection-popover .explanation {
-  font-size: 0.8em;
+  font-size: 0.9em;
   font-style: italic;
+  padding-top: 6px;
+}
+
+.selection-popover .reviews {
+  margin-left: 8px;
+  position: relative;
+  top: -4px;
 }
 
 
@@ -575,8 +605,8 @@ div.tooltip {
 }
 
 .row .header .tagline {
-  margin: 8px;
-  font-size: 0.83em;
+  margin: 6px 8px;
+  font-size: 0.8em;
   font-weight: normal;
   font-style: italic;
 }
@@ -735,6 +765,7 @@ div.tooltip {
   left: 330px;
   max-width: 250px;
   pointer-events: none;
+  background-color: rgba(255,255,255,0.6);
 }
 
 #filterConfig .legendRow {
@@ -755,6 +786,17 @@ div.tooltip {
 #filterConfig .label {
   font-weight: normal;
   font-size: 0.8em;
+}
+
+#filterConfig .plusRow {
+  height: 24px;
+  width: 230px;
+}
+#filterConfig .plusRow .label {
+  position: relative;
+  top: 4px;
+  left: 24px;
+  max-width: 200px;
 }
 
 #filterConfig .legendRow .label {

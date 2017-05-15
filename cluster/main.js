@@ -1,5 +1,6 @@
 
-//beefy main.js:bundle.js -- -t [ babelify --presets [ es2015 ] ]
+//beefy main.js:bundle.js -- -t [ babelify [--presets es2015 ] ]
+//browserify -t [ uglifyify --no-sourcemap ] app.js
 
 require("babel-polyfill");
 var clusterfck = require("clusterfck");
@@ -20,10 +21,15 @@ var LEAFROW_TO_NODE = {};
 var LEAF_NODES = [];
 var LEAF_QUAD_TREE;
 var LEAVES_ONSCREEN = [];
+var CLUSTERS_ONSCREEN = [];
+var LEAFROW_TO_CURRENT_CLUSTER = {};
 var PADDING = 0;
 var DATASET = null;
 
 var FORCE_MODEL = null;
+
+var PALETTE_INDEX = 0;
+var POPOVER_PALETTE = ["#ae451c","#594c3a","#2d8683","#4f437b","#af8200","#3c5589","#537d4f"];
 
 /*
 var svg = d3.select("#graph"),
@@ -95,11 +101,14 @@ class Node{
         this.parentNode = parentNode;
         this.children = children;
         this.depth = depth;
+        this.nearby_rows = [];
         this.vals = new Object(); //lazy load for dataValues
         this.highlighted = false;
         this.groupMember = false;
         this.isOnScreen = true; //assume should be drawn unless marked otherwise
         this.isOnScreenPadded = true; //assume should be drawn unless marked otherwise
+
+        this.rank = -1;
 
         this.radius = Node.circleSize(this);
         this.hullPadding = 6;
@@ -749,7 +758,7 @@ function getScaleForDatatype(data, column, size) {
 
 
 var MAX_ONSCREEN = 20;
-var CLUSTER_SKIP_SIZE = 5; //clusters of this size or lower aren't broken up further, but may combine with other clusters during the merge phase if they are too small onscreen
+var CLUSTER_SKIP_SIZE = 4; //clusters of this size or lower aren't broken up further, but may combine with other clusters during the merge phase if they are too small onscreen
 var CLUSTER_AREA_THRESHOLD = 0.05; //percent of screen taken up before breaking apart
 var CLUSTER_AREA_OFFSCREEN_THRESHOLD = 0.05; //percent of screen taken up offscreen before combine
 var CLUSTER_SPARSENESS_THRESHOLD = 0.0015;
@@ -776,7 +785,7 @@ function adjustClusters(startingNodes, viewSize, isInBounds, isInBoundsPadded) {
 
 
 
-    priorityQueue = new Heap(function(a,b) {
+    let priorityQueue = new Heap(function(a,b) {
         return b.depth - a.depth;   //put the stuff at the _bottom_ of the tree first
     });
     let processedNodes = [];
@@ -966,7 +975,7 @@ function adjustClusters(startingNodes, viewSize, isInBounds, isInBoundsPadded) {
 
     //-------------------------BREAKUP
     //expand onscreen nodes if they are too big
-    let priorityQueue = new Heap(function(a,b) {
+    priorityQueue = new Heap(function(a,b) {
         return -(b.depth - a.depth);   //put the stuff at the top of the tree first
     });
     let finalNodes = [];
@@ -980,8 +989,8 @@ function adjustClusters(startingNodes, viewSize, isInBounds, isInBoundsPadded) {
         let centroid = node.getHullCentroid(LATVAL, LONVAL);
 
         if (node.data_rows.length <= CLUSTER_SKIP_SIZE) {
-            node.isOnScreen = isInBounds(centroid[0],centroid[1]);
-            node.isOnScreenPadded = isInBoundsPadded(centroid[0],centroid[1]);
+            //node.isOnScreen = isInBounds(centroid[0],centroid[1]);
+            //node.isOnScreenPadded = isInBoundsPadded(centroid[0],centroid[1]);
             finalNodes.push(node);
         }
         else if (isInBoundsPadded(centroid[0],centroid[1])) {
@@ -1000,7 +1009,7 @@ function adjustClusters(startingNodes, viewSize, isInBounds, isInBoundsPadded) {
             }
         }
         else {
-            node.isOnScreen = false;
+            //node.isOnScreen = false;
             finalNodes.push(node);
         }
 
@@ -1126,7 +1135,19 @@ function adjustClusters(startingNodes, viewSize, isInBounds, isInBoundsPadded) {
     }
 
     //console.log(doneQueue)
+    //console.log("ADJUSTED")
 
+    //record membership for all leaf_nodes
+    LEAFROW_TO_CURRENT_CLUSTER = {};
+    let x = doneQueue.length-1;
+    while (x>=0) {
+        let y = doneQueue[x].data_rows.length-1;
+        while (y>=0) {
+            LEAFROW_TO_CURRENT_CLUSTER[doneQueue[x].data_rows[y]] = doneQueue[x];
+            y--;
+        }
+        x--;
+    }
 
 
     return doneQueue;
@@ -1153,126 +1174,6 @@ class QuantizationBin {
 
 }
 
-var QUANT_NUM_BINS = 60;
-//var ALL_QUANT_BINS = [];
-
-function quantizeNode(node, latVar, lonVar, width, height, projection) {
-    //uses projection to convert to screenspace since we don't want jitter from noisy projection
-
-    //for now let's just divide the screen into N by N boxes
-    let binSize;
-
-    if (width >= height) {
-        binSize = width / QUANT_NUM_BINS;
-    }
-    else {
-        binSize = height / QUANT_NUM_BINS;
-    }
-
-    binSize = 5;
-
-    let maxW = Math.ceil(width / binSize);
-    let maxH = Math.ceil(height / binSize);
-
-    let quantBins = [];
-    let quantMap = {};
-    let qid = 0;
-    function binFor(lat, lon) {
-
-        let latLng = new google.maps.LatLng(lat, lon);
-        let proj = projection.fromLatLngToContainerPixel(latLng);
-
-        let x_ind = Math.floor(proj.x / binSize);
-        let y_ind = Math.floor(proj.y / binSize);
-
-        //if the bin is outside the viewport, don't even create it
-        if (x_ind < 0 || x_ind > maxW || y_ind < 0 || y_ind > maxH) {
-            return null;
-        }
-
-
-        if (!(x_ind in quantMap)) {
-            quantMap[x_ind] = {};
-        }
-        if (!(y_ind in quantMap[x_ind])) {
-            quantMap[x_ind][y_ind] = new QuantizationBin( qid,
-                                                  x_ind,
-                                                  y_ind,
-                                                  x_ind*binSize,
-                                                  y_ind*binSize,
-                                                  binSize );
-            quantBins.push(quantMap[x_ind][y_ind]);
-            //ALL_QUANT_BINS.push(quantMap[x][y]);
-
-            qid++;
-        }
-
-        return quantMap[x_ind][y_ind];
-
-    }
-
-    let m = 0;
-
-    let i=node.data_rows.length-1;
-    while (i>=0) {
-        let row = node.data_rows[i];
-
-        let bin = binFor(node.data_src[row][latVar],
-                         node.data_src[row][lonVar]);
-        if (bin) {
-            bin.addRow(row);
-            m = Math.max(bin.data_rows.length, m);
-        }
-
-
-        i--;
-    }
-
-
-
-    return [quantBins, m];
-
-
-
-}
-
-
-
-
-
-
-/*
-//doing a flat heuristic makes clusters jump around -- better to selectively break down
-function targetForZoomLevel(zoom) {
-    if (zoom >= 16) {
-        return 100;  //when very close, see all as points
-    }
-    else if (zoom === 15) {
-        return 4;
-    }
-    else if (zoom === 14) {
-        return 10;
-    }
-    else if (zoom === 13) {
-        return 16;
-    }
-    else if (zoom === 12) {
-        return 24;
-    }
-    else if (zoom === 11) {
-        return 30;
-    }
-    else if (zoom === 10) {
-        return 40;
-    }
-    else if (zoom <= 9 && zoom > 5) {
-        return 60;
-    }
-    else {
-        return 100;
-    }
-}
-*/
 
 
 // --------------------- END HEURISTICS --------------------
@@ -1289,18 +1190,22 @@ function targetForZoomLevel(zoom) {
 var VALID_NUM_COLUMNS = ['rating',
                          'price_numeric',
                          'num_reviews',
+                         'log_num_reviews',
                          'ranking',
                          'images',
                          'highlights'];
-var NUM_COLUMN_GETTERS = [function(d) {return parseFloat(d);},
-                        function(d) {return parseFloat(d);},
-                        function(d) {return parseFloat(d);},
-                        function(d) {return parseFloat(d);},
-                        function(d) {return d.length;},
-                        function(d) {return d.length;}];
-var VALID_NOM_COLUMNS = ['categories'];
+var NUM_COLUMN_GETTERS = [function(d) {return parseFloat(d['rating']);},
+                        function(d) {return parseFloat(d['price_numeric']);},
+                        function(d) {return parseFloat(d['num_reviews']);},
+                        function(d) {return Math.log(parseFloat(d['num_reviews']));},
+                        function(d) {return parseFloat(d['ranking']);},
+                        function(d) {return d['images'].length;},
+                        function(d) {return d['highlights'].length;}];
+var VALID_NOM_COLUMNS = ['categories',
+                         'neighborhood'];
 
 var DESC_STATS = {};
+var NEARBY_STATS = {};
 var CLUSTER_STATS = {};
 var RAW_SCORES = {};
 
@@ -1314,40 +1219,40 @@ function gatherStats(leaf_nodes) {
         let getter = NUM_COLUMN_GETTERS[k];
 
         scratch.sort(function (a,b) {
-            let aRating = getter(a.data_src[a.data_rows[0]][col]);
-            let bRating = getter(b.data_src[b.data_rows[0]][col]);
+            let aRating = getter(a.data_src[a.data_rows[0]]);
+            let bRating = getter(b.data_src[b.data_rows[0]]);
             return bRating-aRating;
         });
         let sum=0;
         let i=scratch.length-1;
         while (i>=0) {
-            sum = sum + getter(scratch[i].data_src[scratch[i].data_rows[0]][col]);
+            sum = sum + getter(scratch[i].data_src[scratch[i].data_rows[0]]);
             i--;
         }
         let mean = sum / scratch.length;
         sum = 0;
         i=scratch.length-1;
         while (i>=0) {
-            sum = sum + Math.pow(getter(scratch[i].data_src[scratch[i].data_rows[0]][col]) - mean,2);
+            sum = sum + Math.pow(getter(scratch[i].data_src[scratch[i].data_rows[0]]) - mean,2);
             i--;
         }
         let sd = Math.sqrt(sum / scratch.length);
 
         DESC_STATS[col] = {mean: mean,
-                           max: getter(scratch[0].data_src[scratch[0].data_rows[0]][col]),
-                           min: getter(scratch[0].data_src[scratch[scratch.length-1].data_rows[0]][col]),
-                           median: getter(scratch[0].data_src[scratch[Math.floor(scratch.length/2.0)].data_rows[0]][col]),
+                           max: getter(scratch[0].data_src[scratch[0].data_rows[0]]),
+                           min: getter(scratch[0].data_src[scratch[scratch.length-1].data_rows[0]]),
+                           median: getter(scratch[0].data_src[scratch[Math.floor(scratch.length/2.0)].data_rows[0]]),
                            sd: sd };
         DESC_STATS[col].scale = d3.scaleLinear().domain([DESC_STATS[col].min, DESC_STATS[col].max]).range([0, 1]);
 
 
     }
 
-    let pop_cutoff = 0.5;
+    let pop_cutoff = 0.3;
     let rating_cutoff = 3.9;
 
-    for (let k=0; k<VALID_NOM_COLUMNS.length; k++) {
-        let col = VALID_NOM_COLUMNS[k];
+    for (let y=0; y<VALID_NOM_COLUMNS.length; y++) {
+        let col = VALID_NOM_COLUMNS[y];
 
         let raw_counts = {};
         let popular_counts = {};
@@ -1358,8 +1263,14 @@ function gatherStats(leaf_nodes) {
         while (i>=0) {
             let node = scratch[i];
             let k = node.data_src[node.data_rows[0]][col].length-1;
+            let dat = node.data_src[node.data_rows[0]][col];
+            if (dat.constructor !== Array) {
+                k=0;
+                dat = [ node.data_src[node.data_rows[0]][col] ];
+            }
+
             while (k>=0) {
-                let v = node.data_src[node.data_rows[0]][col][k];
+                let v = dat[k];
                 let popular = DESC_STATS['num_reviews'].scale(parseFloat(node.data_src[node.data_rows[0]]['num_reviews']));
                 let rating = parseFloat(node.data_src[node.data_rows[0]]['rating']);
 
@@ -1381,13 +1292,13 @@ function gatherStats(leaf_nodes) {
 
                 k--;
             }
+
             i--;
         }
-
         for (let col in ranked_by_genre) {
             ranked_by_genre[col].sort(function(a,b) {
-                return parseFloat(scratch[0].data_src[b]['ranking']) -
-                       parseFloat(scratch[0].data_src[a]['ranking']);
+                return parseFloat(scratch[0].data_src[a]['ranking']) -
+                       parseFloat(scratch[0].data_src[b]['ranking']);
             });
         }
 
@@ -1400,7 +1311,72 @@ function gatherStats(leaf_nodes) {
     }
 
 
-    console.log(DESC_STATS);
+    NEARBY_STATS = {};
+
+    for (let y=0; y<VALID_NOM_COLUMNS.length; y++) {
+        let col = VALID_NOM_COLUMNS[y];
+
+        let raw_counts = {};
+        let max_counts = {};
+
+        let i=scratch.length-1;
+        while (i>=0) {
+            let node = scratch[i];
+
+            let near_cats = {};
+
+            let x=node.nearby_rows.length-1;
+            while (x>=0) {
+                let near = node.nearby_rows[x];
+                let k = node.data_src[near][col].length-1;
+                let dat = node.data_src[near][col];
+                if (dat.constructor !== Array) {
+                    k=0;
+                    dat = [ node.data_src[near][col] ];
+                }
+
+                while (k>=0) {
+                    let v = dat[k];
+
+                    if (!(v in near_cats)) {
+                        near_cats[v] = 0;
+                    }
+
+                    near_cats[v] = near_cats[v] + 1;
+
+                    k--;
+                }
+
+                x--;
+            }
+
+            for (let v in near_cats) {
+                if (!(v in max_counts)) {
+                    max_counts[v] = 0;
+                }
+                max_counts[v] = Math.max(max_counts[v], near_cats[v]);
+            }
+
+            raw_counts[node.data_rows[0]] = near_cats;
+
+            i--;
+        }
+
+        for (let v in max_counts) {
+            max_counts[v] = d3.scaleLinear().domain([0, max_counts[v]]).range([0, 1]);
+
+        }
+
+
+        NEARBY_STATS[col] = {counts: raw_counts,
+                             scales: max_counts };
+
+    }
+
+    //console.log(NEARBY_STATS);
+
+
+    //console.log(DESC_STATS);
     return DESC_STATS;
 }
 
@@ -1419,36 +1395,36 @@ function clusterStats(n) {
         let getter = NUM_COLUMN_GETTERS[k];
 
         rows.sort(function (a,b) {
-            let aRating = getter(n.data_src[a][col]);
-            let bRating = getter(n.data_src[b][col]);
+            let aRating = getter(n.data_src[a]);
+            let bRating = getter(n.data_src[b]);
             return bRating-aRating;
         });
         let sum=0;
         let i=rows.length-1;
         while (i>=0) {
-            sum = sum + getter(n.data_src[rows[i]][col]);
+            sum = sum + getter(n.data_src[rows[i]]);
             i--;
         }
         let mean = sum / rows.length;
         sum = 0;
         i=rows.length-1;
         while (i>=0) {
-            sum = sum + Math.pow(getter(n.data_src[rows[i]][col]) - mean,2);
+            sum = sum + Math.pow(getter(n.data_src[rows[i]]) - mean,2);
             i--;
         }
         let sd = Math.sqrt(sum / rows.length);
 
         stats[col] = {mean: mean,
-                           max: getter(n.data_src[rows[0]][col]),
-                           min: getter(n.data_src[rows[rows.length-1]][col]),
-                           median: getter(n.data_src[rows[Math.floor(rows.length/2.0)]][col]),
-                           sd: sd };
+                       max: getter(n.data_src[rows[0]]),
+                       min: getter(n.data_src[rows[rows.length-1]]),
+                       median: getter(n.data_src[rows[Math.floor(rows.length/2.0)]]),
+                       sd: sd };
         stats[col].scale = d3.scaleLinear().domain([stats[col].min, stats[col].max]).range([0, 1]);
 
 
     }
 
-    let pop_cutoff = 0.5;
+    let pop_cutoff = 0.3;
     let rating_cutoff = 3.9;
 
     for (let k=0; k<VALID_NOM_COLUMNS.length; k++) {
@@ -1458,21 +1434,39 @@ function clusterStats(n) {
         let popular_counts = {};
         let best_counts = {};
         let ranked_by_genre = {};
+        let best_in_cat = {};
+        let most_pop_in_cat = {};
 
         let i=rows.length-1;
         while (i>=0) {
             let row = rows[i];
             let k = n.data_src[row][col].length-1;
+            let dat = n.data_src[row][col];
+            if (dat.constructor !== Array) {
+                k=0;
+                dat = [ n.data_src[row][col] ];
+            }
+
             while (k>=0) {
-                let v = n.data_src[row][col][k];
+                let v = dat[k];
                 let popular = DESC_STATS['num_reviews'].scale(parseFloat(n.data_src[row]['num_reviews']));
                 let rating = parseFloat(n.data_src[row]['rating']);
+                let rank = LEAFROW_TO_NODE[row].rank;
 
                 if (!(v in raw_counts)) {
                     raw_counts[v] = 0;
                     popular_counts[v] = 0;
                     best_counts[v] = 0;
                     ranked_by_genre[v] = [];
+                    best_in_cat[v] = ['',Number.MAX_VALUE];
+                    most_pop_in_cat[v] = ['',-1];
+                }
+
+                if (rank < best_in_cat[v][1]) {
+                    best_in_cat[v] = [row, rank];
+                }
+                if (popular > most_pop_in_cat[v][1]) {
+                    most_pop_in_cat[v] = [row, popular];
                 }
 
                 raw_counts[v] = raw_counts[v] + 1;
@@ -1489,40 +1483,94 @@ function clusterStats(n) {
             i--;
         }
 
+
+        let common = null;
+        let most_count = -1;
+        for (let col in raw_counts) {
+            if (raw_counts[col] > most_count) {
+                common = col;
+                most_count = raw_counts[col];
+            }
+        }
+
         for (let col in ranked_by_genre) {
             ranked_by_genre[col].sort(function(a,b) {
-                return parseFloat(n.data_src[b]['ranking']) -
-                       parseFloat(n.data_src[a]['ranking']);
+                return LEAFROW_TO_NODE[a].rank - LEAFROW_TO_NODE[b].rank;
             });
         }
 
+
         stats[col] = {
+            most_common: common,
+            majority_col: ((raw_counts[common] / rows.length) >= 0.5 ? common : null),
             count: raw_counts,
             popular: popular_counts,
             high_rated: best_counts,
-            ranked: ranked_by_genre
+            ranked: ranked_by_genre,
+            top_ranked: best_in_cat,
+            top_popular: most_pop_in_cat
         };
     }
 
+
+    let cluster_rank = {};
+    rows.sort(function(a,b) { return LEAFROW_TO_NODE[a].rank - LEAFROW_TO_NODE[b].rank; });
+    for (let k = 0; k<rows.length; k++) {
+        cluster_rank[rows[k]] = k;
+    }
+    CLUSTER_STATS["*node_rank"];
+
+
+
+
+
+
     CLUSTER_STATS[n.id] = stats;
+    //console.log(CLUSTER_STATS);
     return stats;
 
 }
 
+function updateLeafRankings() {
 
-function rankLeaves(leaf_nodes) {
+    let scratch = LEAF_NODES.slice();
 
-    let scratch = leaf_nodes.slice();
+    //debug
+    scratch.sort(function(a,b) {return b.rank - a.rank;});
+    let t =[];
+    let q=0;
+    while(q<scratch.length) {
+        t.push(DATASET[scratch[q].data_rows[0]].name);
+        q++;
+    }
+    //console.log(t);
+
 
     //for now leaving out BOUNDS since it makes the recommendation unstable when panning
-    function score(rating, reviews, ranking, picNum, snipNum) {
+    function modelScore(rating, reviews, ranking, picNum, snipNum) {
         //range from 1 to 5.6
         return (rating +
                 DESC_STATS['num_reviews'].scale(reviews) * 1.3 + //reviews can boost up or down a score
                 DESC_STATS['images'].scale(picNum) * 0.2 + //pictures boost scores
                 DESC_STATS['highlights'].scale(snipNum) * 0.5 +
-                DESC_STATS['ranking'].scale(ranking) * - 1);
+                DESC_STATS['ranking'].scale(ranking) * - 1) / 7.0;
 
+    }
+
+    function userScore(rows) {
+
+        if (activeWeights.length > 0) {
+            let avg = 0;
+            for (let w of activeWeights) {
+
+                avg = avg + w.weightFunction(rows).weight;
+
+            }
+            return 1.5 * avg / activeWeights.length;
+        }
+        else {
+            return 0;
+        }
     }
 
     scratch.sort( function(a,b) {
@@ -1537,47 +1585,190 @@ function rankLeaves(leaf_nodes) {
         let aPics = a.data_src[a.data_rows[0]]['images'].length;
         let bPics = b.data_src[b.data_rows[0]]['images'].length;
 
-        return score(bRating, bReviews, bRanking, bPics, bSnips) -
-               score(aRating, aReviews, aRanking, aPics, aSnips);
+        return (modelScore(bRating, bReviews, bRanking, bPics, bSnips) + userScore(b.data_rows)) -
+               (modelScore(aRating, aReviews, aRanking, aPics, aSnips) + userScore(a.data_rows));
     });
 
-    /*
-    let leaf_ranking = {};
-    i=0;
-    while(i<ranking.length) {
-        leaf_ranking[ranking[i]] = i;
-        i++;
-    }*/
 
-    return scratch;
+
+    //update the ranking value in the nodes
+    t =[];
+    let i=0;
+    while(i<scratch.length) {
+        scratch[i].rank = i+1;
+        t.push(DATASET[scratch[i].data_rows[0]].name);
+
+        i++;
+    }
+
 
 }
 
 
-function explainLeaf(leafNode, cluster) {
-
+function explainLeaf(leafNode) {
+    let cluster = LEAFROW_TO_CURRENT_CLUSTER[leafNode.data_rows[0]];
     //ignoring user level features for now
+    let datarow = leafNode.data_rows[0];
 
     //overall stats
     let overall_list = {
-        best: parseFloat(leafNode.data_src[leafNode.data_rows[0]]['ranking']) <= 10,
-        rating: DESC_STATS['rating'].scale(parseFloat(leafNode.data_src[leafNode.data_rows[0]]['rating'])) >= 0.9,
-        popularity: DESC_STATS['rating'].scale(parseFloat(leafNode.data_src[leafNode.data_rows[0]]['rating'])) >= 0.9,
+        node_id: leafNode.id,
+        row_id: datarow,
+        top10: parseFloat(leafNode.data_src[datarow]['ranking']) <= 10,
+        rating: DESC_STATS['rating'].scale(parseFloat(leafNode.data_src[datarow]['rating'])) >= 0.9,
+        rating_quartile: Math.floor(DESC_STATS['rating'].scale(parseFloat(leafNode.data_src[datarow]['rating'])) / 0.25),
+        popularity: DESC_STATS['log_num_reviews'].scale(Math.log(parseFloat(leafNode.data_src[datarow]['log_num_reviews']))) >= 0.75,
+        affordable: DESC_STATS['price_numeric'].scale(parseFloat(leafNode.data_src[datarow]['price_numeric'])) <= 0.25,
+        pricey: DESC_STATS['price_numeric'].scale(parseFloat(leafNode.data_src[datarow]['price_numeric'])) >= 0.75,
+        first_cat: leafNode.data_src[datarow]['first_category'],
         genre_top10: [],
         genre_best: [],
+        genre_rare: [],
+        //NEED TO INCLUDE POPULARITY HERE
+        neighborhood_best: "",
+        neighborhood_top10: "",
+
     };
-    for (let cat of leafNode.data_src[leafNode.data_rows[0]]['categories']) {
-        if (DESC_STATS['categories']['ranked'][cat].indexOf(leafNode.data_rows[0]) < 10 &&
-            DESC_STATS['categories']['count'][cat] > 10) {
-                overall_list.genre_top10.push(cat);
-                if (DESC_STATS['categories']['ranked'][cat].indexOf(leafNode.data_rows[0]) === 0 &&
-                    DESC_STATS['categories']['count'][cat] > 10) {
-                        overall_list.genre_best.push(cat);
-                }
+    if (overall_list.first_cat.endsWith("s")) { overall_list.first_cat = overall_list.first_cat.slice(0,-1); }
+    for (let cat of leafNode.data_src[datarow]['categories']) {
+        let disp = cat;
+        if (cat.endsWith("s")) { disp = cat.slice(0,-1); }
+        if (DESC_STATS['categories']['ranked'][cat].indexOf(datarow) < 10 &&
+            DESC_STATS['categories']['count'][cat] > 20) {
+                overall_list.genre_top10.push(disp);
+        }
+        if (DESC_STATS['categories']['ranked'][cat].indexOf(datarow) === 0 &&
+            DESC_STATS['categories']['count'][cat] > 7) {
+                overall_list.genre_best.push(disp);
+        }
+        if (DESC_STATS['categories']['count'][cat] < 4) {
+            overall_list.genre_rare.push(disp);
+        }
+    }
+    let neighborhood = leafNode.data_src[datarow]['neighborhood'];
+    if (neighborhood.length > 0) {
+        if (DESC_STATS['neighborhood']['ranked'][neighborhood].indexOf(datarow) < 10 &&
+            DESC_STATS['neighborhood']['count'][neighborhood] > 20) {
+                overall_list.neighborhood_top10 = neighborhood;
+        }
+        if (DESC_STATS['neighborhood']['ranked'][neighborhood].indexOf(datarow) === 0 &&
+            DESC_STATS['neighborhood']['count'][neighborhood] > 6) {
+                overall_list.neighborhood_best = neighborhood;
         }
     }
 
     //as compared to cluster
+    let cstat = clusterStats(cluster);
+
+    //fill in later
+
+    let modifier = "";
+    if (overall_list.top10) {
+        modifier = "top 10 ";
+    }
+    else if (overall_list.popularity) {
+        modifier = "popular ";
+    }
+    else if (overall_list.rating) {
+        modifier = "excellent rating ";
+    }
+    else if (overall_list.affordable) {
+        modifier = "affordable ";
+    }
+    else if (overall_list.pricey) {
+        modifier = "upscale ";
+    }
+    else {
+        if (overall_list.rating_quartile === 0) {
+            modifier = "poorly rated ";
+        }
+        else if (overall_list.rating_quartile === 1 ) {
+            modifier = "below average ";
+        }
+        else if (overall_list.rating_quartile === 2 ) {
+            modifier = "above average ";
+        }
+        else if (overall_list.rating_quartile === 3 ) {
+            modifier = "highly rated ";
+        }
+    }
+
+
+
+
+
+
+        //scan for genre first
+        let genre_keyword = "";
+        let foundGenre = false;
+        let match = false;
+        for (let w of activeWeights) {
+            if (w.needsNomColor) {
+                foundGenre = true;
+                if (w.weightFunction([datarow]).weight > 0.1) {
+                    genre_keyword = w.name + " &";
+                    match = true;
+                    break;
+                }
+            }
+        }
+        if (foundGenre && !match) {
+            genre_keyword = "not a selected genre, but";
+        }
+
+        let mw = -1;
+        let attrib = "";
+        let intensity = "";
+        for (let w of activeWeights) {
+            if (!w.needsNomColor) {
+                let weight = w.weightFunction([datarow]).weight;
+                if (weight > mw && weight > 0) {
+                    mw = weight;
+                    attrib = w.explanationsuffix;
+                    console.log(weight);
+                    console.log(Math.ceil(weight / 0.25)-1);
+                    intensity = w.intensityterms[Math.ceil(weight / 0.25)-1] + " ";
+                }
+            }
+        }
+
+    if (genre_keyword.length > 0 && attrib.length > 1) {
+        return genre_keyword + " " + intensity + attrib;
+    }
+    if (genre_keyword.length > 0 && attrib.length < 1) {
+        return genre_keyword + " " + modifier;
+    }
+    else if (genre_keyword.length < 1 && attrib.length > 0) {
+        return intensity + attrib;
+    }
+    else {
+
+        if (overall_list.genre_best.length > 0) {
+            if (overall_list.first_cat in overall_list.genre_best) {
+                return "Best "+overall_list.genre_best[overall_list.genre_best.indexOf(overall_list.first_cat)]+" in town";
+            }
+            else {
+                return "Best "+overall_list.genre_best[0]+" in town";
+            }
+        }
+        if (overall_list.neighborhood_best.length > 0) {
+            return "Best restaurant in "+overall_list.neighborhood_best;
+        }
+        if (overall_list.genre_top10.length > 0) {
+            return "Top 10 "+overall_list.genre_top10[0]+" in town";
+        }
+        if (overall_list.genre_top10.length > 0) {
+            return "Top 10 in "+overall_list.neighborhood_top10;
+        }
+        if (overall_list.genre_rare.length > 0) {
+            return overall_list.genre_rare[0]+" food is uncommon";
+        }
+        return modifier + overall_list.first_cat + "";
+    }
+
+
+
+
 
 
 
@@ -1807,9 +1998,8 @@ function SVGOverlay (map, data) {
     this.onBoundsChanged = this.onBoundsChanged.bind(this);
     this.onZoomStarted = this.onZoomStarted.bind(this);
     this.onZoomFinished = this.onZoomFinished.bind(this);
-    this.updateSlices = this.updateSlices.bind(this);
-    this.buildSlices = this.buildSlices.bind(this);
     this.onMouseClick = this.onMouseClick.bind(this);
+    this.onMouseMove = this.onMouseMove.bind(this);
 
 
     this.setMap(map);
@@ -1818,82 +2008,259 @@ function SVGOverlay (map, data) {
 SVGOverlay.prototype = new google.maps.OverlayView();
 
 
-SVGOverlay.prototype.buildSlices = function () {
-
-
-    //console.log("buildslices");
-
-    this.slicedNodes = ROOT_NODES;
-
-
-    //DEPRECATED - LET THE OBJECTIVE FUNCTION ALGORITHM DO THE BREAKING AT THE START
-    /*
-    //SLIDER UPDATE SCRIPT ------------------------------
-    let sliderVal = d3.select("#group-slider").attr("value");
-    console.log(sliderVal);
-
-    let targetNum = Math.round(this.data.length * sliderVal);
-
-    targetNum = MAX_ONSCREEN;  //disregarding slider output
-    //console.log(targetNum);
-    console.log("target: "+targetNum);
 
 
 
-    //do a BFS to do the slicing for now
-    this.slicedNodes = [];
-    let queue = [];
-    for (let root of ROOT_NODES) {
-        queue.push(root);
-    }
-    while (queue.length > 0) {
-        let cur = queue.shift();
+SVGOverlay.prototype.updateLeavesOnscreen = function() {
+    //march through quadtree to keep running list of all leaves onscreen
+    let bounds = this.map.getBounds();
+    let latMin = Math.min(bounds.getSouthWest().lat(), bounds.getNorthEast().lat());
+    let latMax = Math.max(bounds.getSouthWest().lat(), bounds.getNorthEast().lat());
+    let lonMin = Math.min(bounds.getSouthWest().lng(), bounds.getNorthEast().lng());
+    let lonMax = Math.max(bounds.getSouthWest().lng(), bounds.getNorthEast().lng());
 
-        if (cur.children.length === 0) { //hit a leaf node, add it to the list
 
-            this.slicedNodes.push(cur);
-
+    LEAVES_ONSCREEN = [];
+    LEAF_QUAD_TREE.visit(function(node, x1, y1, x2, y2) {
+    if (!node.length) {
+      do {
+        let d = node.data;
+        let lat = d.data_src[d.data_rows[0]][LATVAL];
+        let lon = d.data_src[d.data_rows[0]][LONVAL];
+        if ((lat > latMin) && (lat < latMax) && (lon > lonMin) && (lon < lonMax)) {
+            LEAVES_ONSCREEN.push(d);
         }
-        else {
-
-            if (queue.length + this.slicedNodes.length >= targetNum) {
-                //we're at saturation, kill the loop after appending the queue
-                for (let node of queue) {
-
-                    this.slicedNodes.push(node);
-
-                }
-                break;
-            }
-            else {
-                for (let child of cur.children) {
-                    queue.push(child)
-                }
-            }
-
-        }
-
+      } while (node = node.next);
     }
-    */
-
-
-    this.updateSlices();
+    return x1 >= lonMax || y1 >= latMax || x2 < lonMin || y2 < latMin;
+    });
 
 };
 
 
-var PREVIOUS_PX_BOUNDS = []
-SVGOverlay.prototype.updateSlices = function () {
+SVGOverlay.prototype.updateClustersOnscreen = function() { //uses this.slicedNodes
+    //march through quadtree to keep running list of all leaves onscreen
+    let bounds = this.map.getBounds();
+    let latMin = Math.min(bounds.getSouthWest().lat(), bounds.getNorthEast().lat());
+    let latMax = Math.max(bounds.getSouthWest().lat(), bounds.getNorthEast().lat());
+    let lonMin = Math.min(bounds.getSouthWest().lng(), bounds.getNorthEast().lng());
+    let lonMax = Math.max(bounds.getSouthWest().lng(), bounds.getNorthEast().lng());
+    let latPad = (latMax - latMin) * 0.05;
+    let lonPad = (lonMax - lonMin) * 0.05;
+    latMin -= latPad;
+    latMax += latPad;
+    lonMin -= lonPad;
+    lonMax += lonPad;
 
-    //console.log("updateslices");
+    let singles = [];
+    let multiples = [];
+    let i=this.slicedNodes.length-1;
+    while(i>=0) {
+        let n = this.slicedNodes[i];
+        if (n.data_rows.length < 2) {
 
-    //first combine ANY nodes that are below threshold
-    // we only want to break stuff that is visible and then repackage it when out of view
+          let lat = n.data_src[n.data_rows[0]][LATVAL];
+          let lon = n.data_src[n.data_rows[0]][LONVAL];
+          if ((lat > latMin) && (lat < latMax) && (lon > lonMin) && (lon < lonMax)) {
+              singles.push(n);
+          }
+        }
+        else {
+            let rect = n.getHullBoundingBox(LATVAL, LONVAL);
+            let onscreen = true;
+            if (rect[0] > latMax || latMin > rect[2]) {
+                onscreen = false;
+            }
+            if (rect[1] > lonMax || lonMin > rect[3]) {
+                onscreen = false;
+            }
+            if (onscreen) {
+                multiples.push(n);
+            }
+        }
+
+        i--;
+    }
+
+    CLUSTERS_ONSCREEN = {singletons: singles, clusters: multiples};
+
+};
+
+SVGOverlay.prototype.onZoomStarted = function () {
+    //console.log('***ZOOM   -----'+this.map.getZoom());
+
+    this.recentlyZoomed = true;
+
+};
+
+
+SVGOverlay.prototype.onAdd = function () {
+    this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    //this.svg.style.position = 'absolute';
+    //this.svg.style.top = '8px';
+    //this.svg.style.left = '8px';
+    //this.svg.style.zIndex = 100;
+    //this.svg.style.pointerEvents = 'none';
+    this.svg.id = "mapSVG"
+    //this.width = 1100;
+    //this.height = 600;
+
+
+    /*d3.select(this.svg)
+        .attr('width', 1100)
+        .attr('height', 600);*/
+
+
+    d3.select(this.svg)
+        .append('g')
+        .attr('id', 'region_overlay')
+        .attr('x_offset', 0)
+        .attr('y_offset', 0);
+
+
+    d3.select(this.svg)
+        .append('g')
+        .attr('id', 'circles_overlay')
+        .attr('x_offset', 0)
+        .attr('y_offset', 0);
+
+    d3.select(this.svg)
+        .append('g')
+        .attr('id', 'animation_overlay')
+        .attr('x_offset', 0)
+        .attr('y_offset', 0);
+
+
+    d3.select(this.svg)
+        .append('g')
+        .attr('id', 'selection_overlay')
+        .attr('x_offset', 0)
+        .attr('y_offset', 0);
+
+    d3.select(this.svg)
+        .append('g')
+        .attr('id', 'recommendation_overlay')
+        .attr('x_offset', 0)
+        .attr('y_offset', 0);
+
+
+    d3.select(this.svg)
+        .append('defs')
+        .attr('id', 'path_defs');
+
+    d3.select("#popoverContainer")
+        .attr("width", "100%")
+        .attr("height", "100%");
+
+    d3.select("#popoverLines")
+        .attr("width", "100%")
+        .attr('height', "100%");
+
+    d3.select("#canvasContainer")
+        .attr('x_offset', 0)
+        .attr('y_offset', 0);
+
+    d3.select('#region_overlay').attr('class', 'coords');
+
+    var projection = this.getProjection();
+
+
+    this.popoverNodes = [];
+
+
+    this.slicedNodes = ROOT_NODES;
+
+
+    document.getElementById("svgPositioner").appendChild(this.svg);
+
+
+    this.onPan();
+    this.map.addListener('center_changed', this.onPan);
+    this.map.addListener('zoom_changed', this.onZoomStarted);
+    this.map.addListener('bounds_changed', this.onBoundsChanged);
+    this.map.addListener('mousemove', this.onMouseMove);
+    this.map.addListener('click', this.onMouseClick);
+
+
+    this.rebuildForceModel();
+
+    buildWeightRows();
+
+
+    LEAVES_ONSCREEN = LEAF_NODES;
+
+    this.recentlyZoomed = true;
+
+
+/*
+//DEBUG TEST
+    for (let i=0; i<4; i++) {
+        let container = d3.select('#popoverContainer').append("div");
+        this.buildPopover(LEAF_NODES[i], projection, container.node(), true);
+    }*/
+
+};
+
+
+//move outlines during pan so they stay in frame
+var FORCED_RESIZE = false;
+SVGOverlay.prototype.onBoundsChanged = function () {
+    //console.log('***BOUNDS')
+
+    if (this.recentlyZoomed || FORCED_RESIZE) {
+        this.recentlyZoomed=false;
+        FORCED_RESIZE=false;
+        this.onZoomFinished();
+    }
+
+
+    //this.updateRegionView();
+    this.updateLeavesOnscreen();
+    this.updateClustersOnscreen();
+    //console.log(CLUSTERS_ONSCREEN);
+    //console.log(LEAVES_ONSCREEN);
+    this.updateSideBarWithLeaves(LEAVES_ONSCREEN, false);
+    this.updateRecommendedPopovers();
+
+
+
+    let bounds = this.map.getBounds();
+    //this.updateSlices();
+
+
+    this.updateForceModelWithNewBounds(bounds);
+    this.updatePopoverObjectsFromForce(false, false);
+
+
+
+    if (this.last_layout_bounds) {
+        translateRegionView(this.last_layout_bounds, bounds);
+        this.last_layout_bounds = bounds;
+    }
+    else {
+        this.redrawRegionView(this.last_layout_bounds, bounds);
+    }
+
+};
+
+
+//move outlines during pan so they stay in frame
+var PREVIOUS_PX_BOUNDS = [];
+var STARTING_ZOOM_SW_REF = null;
+SVGOverlay.prototype.onZoomFinished = function () {
+    //console.log('***ZOOM_DONE   -----'+this.map.getZoom());
+    // var t = this;
+    // setTimeout(function() {
+    // },1000);
+    // */
+    // clearExpansion();
+
     let bounds = this.map.getBounds();
     let latMin = bounds.getSouthWest().lat();
     let latMax = bounds.getNorthEast().lat();
     let lonMin = bounds.getSouthWest().lng();
     let lonMax = bounds.getNorthEast().lng();
+    STARTING_ZOOM_SW_REF = bounds.getSouthWest();
 
     //adjust padding to make sure scrolling pop doesn't happen
     //count stuff 1/2 screen away as visible
@@ -1920,6 +2287,7 @@ SVGOverlay.prototype.updateSlices = function () {
     }
 
 
+
     let viewSize = Math.abs(latMin*10 - latMax*10) * Math.abs(lonMin*10 - lonMax*10);
 
     //check if we've recently changed zoom amount -- if so, we need to clear the expansion at the start
@@ -1928,190 +2296,34 @@ SVGOverlay.prototype.updateSlices = function () {
 
     if (viewSizeChanged) { //need big epsilon to fuzz small changes
         clearExpansion();
-        console.log("VIEW_SIZE_CHANGED");
+        //console.log("VIEW_SIZE_CHANGED");
     }
     PREVIOUS_VIEWSIZE = viewSize;
 
-    //console.log('lat'+(latMax-latMin)+' lon'+(lonMax-lonMin)+' view'+viewSize);
 
-
-    if (viewSizeChanged) {
     this.slicedNodes = adjustClusters(this.slicedNodes, viewSize, isInBounds, isInBoundsPadded);
-}
-    //scoreNodes(DATASET, this.slicedNodes);
-
-   //set up all nodes as paths -- we get fancy enclosing ones for groups
-    if (d3.select("#region_overlay")) {
-        //console.log("updating region overlay (updateSlices)");
-
-        this.updateRegionView(bounds, viewSize, viewSizeChanged);
-
-    }
-};
 
 
-
-SVGOverlay.prototype.onAdd = function () {
-    this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    this.svg.style.position = 'absolute';
-    this.svg.style.top = '8px';
-    this.svg.style.left = '8px';
-    this.svg.style.width = '1100px';
-    this.svg.style.height = '600px';
-    this.svg.style.zIndex = 100;
-    this.svg.style.pointerEvents = 'none';
-    this.svg.id = "mapSVG"
-    this.width = 1100;
-    this.height = 600;
-
-
-    d3.select(this.svg)
-        .attr('width', 1100)
-        .attr('height', 600);
-
-
-    d3.select(this.svg)
-        .append('g')
-        .attr('id', 'region_overlay')
-        .attr('x_offset', 0)
-        .attr('y_offset', 0);
-
-    d3.select(this.svg)
-        .append('g')
-        .attr('id', 'recommendation_overlay')
-        .attr('x_offset', 0)
-        .attr('y_offset', 0);
-
-    d3.select(this.svg)
-        .append('defs')
-        .attr('id', 'path_defs');
-
-    d3.select("#popoverContainer")
-        .attr("width", 1100)
-        .attr("height", 600);
-
-    d3.select("#popoverLines")
-        .attr("width", 1100)
-        .attr('height', 600);
-
-    d3.select("#canvasContainer")
-        .attr('x_offset', 0)
-        .attr('y_offset', 0);
-
-    d3.select('#region_overlay').attr('class', 'coords');
-
-    var projection = this.getProjection();
-
-
-    this.popoverNodes = [];
-
-
-    this.buildSlices();
-
-    document.body.appendChild(this.svg);
-    this.onPan();
-    this.map.addListener('center_changed', this.onPan);
-    this.map.addListener('zoom_changed', this.onZoomStarted);
-    this.map.addListener('bounds_changed', this.onBoundsChanged);
-    //this.map.addListener('mousemove', this.onMouseMove);
-    this.map.addListener('click', this.onMouseClick);
-
-
-    this.rebuildForceModel();
-
-    LEAVES_ONSCREEN = LEAF_NODES;
-    this.buildRankingSlider();
-
-
-/*
-//DEBUG TEST
-    for (let i=0; i<4; i++) {
-        let container = d3.select('#popoverContainer').append("div");
-        this.buildPopover(LEAF_NODES[i], projection, container.node(), true);
-    }*/
-
-};
-
-
-//move outlines during pan so they stay in frame
-SVGOverlay.prototype.onBoundsChanged = function () {
-    //console.log('***BOUNDS')
-
-    if (this.recentlyZoomed) {
-        this.recentlyZoomed=false;
-        this.onZoomFinished();
-    }
-
-    //this.updateRegionView();
-    this.updateLeavesOnscreen();
-
-    let bounds = this.map.getBounds();
-    this.updateSlices();
-    this.updateForceModelWithNewBounds(bounds);
-    this.updatePopoverObjectsFromForce(false, false);
-
-    if (this.last_layout_bounds) {
-        translateRegionView(this.last_layout_bounds, bounds);
-        this.last_layout_bounds = bounds;
-    }
-    else {
-        this.redrawRegionView(bounds);
-    }
-
-};
-
-
-SVGOverlay.prototype.updateLeavesOnscreen = function() {
-    //march through quadtree to keep running list of all leaves onscreen
-    let bounds = this.map.getBounds();
-    let latMin = Math.min(bounds.getSouthWest().lat(), bounds.getNorthEast().lat());
-    let latMax = Math.max(bounds.getSouthWest().lat(), bounds.getNorthEast().lat());
-    let lonMin = Math.min(bounds.getSouthWest().lng(), bounds.getNorthEast().lng());
-    let lonMax = Math.max(bounds.getSouthWest().lng(), bounds.getNorthEast().lng());
-
-
-    LEAVES_ONSCREEN = [];
-    LEAF_QUAD_TREE.visit(function(node, x1, y1, x2, y2) {
-    if (!node.length) {
-      do {
-        let d = node.data;
-        let lat = d.data_src[d.data_rows[0]][LATVAL];
-        let lon = d.data_src[d.data_rows[0]][LONVAL];
-        if ((lat > latMin) && (lat < latMax) && (lon > lonMin) && (lon < lonMax)) {
-            LEAVES_ONSCREEN.push(d);
-        }
-      } while (node = node.next);
-    }
-    return x1 >= lonMax || y1 >= latMax || x2 < lonMin || y2 < latMin;
-    });
-    //console.log(LEAVES_ONSCREEN);
-    this.computeNewLeafRankings();
-    this.updateRecommendedPopovers();
-
-};
-
-SVGOverlay.prototype.onZoomStarted = function () {
-    console.log('***ZOOM   -----'+this.map.getZoom());
-
-    this.recentlyZoomed = true;
-
-};
-
-//move outlines during pan so they stay in frame
-SVGOverlay.prototype.onZoomFinished = function () {
-    /*console.log('***ZOOM_DONE   -----'+this.map.getZoom());
-    var t = this;
-    setTimeout(function() {
-    },1000);
-    // */
-    // clearExpansion();
+    this.deselectClusters();
 
     this.last_layout_bounds = null; //wipe past transform on popovers etc
     this.currentCanvasTiles = null;
+    this.CANVAS_TILE_DB = {}; //wipe the cache of tiles
     let projection = this.getProjection();
-    let bounds = this.map.getBounds();
     //this.resetAllPopupPositions( projection );
     //this.layoutPopups( projection );
+
+
+    //compute rankings, notations, and rendering styles for nodes
+
+
+
+
+    //this.currentCanvasTiles = this.getCanvasTilesForClustersAtCurrentZoom(this.slicedNodes);
+    let sizeFunction = function(rows) {
+        return DESC_STATS.log_num_reviews.scale(Math.log(DATASET[rows[0]].num_reviews)) * 3 + 2;
+    };
+    this.generateSVGCirclesForClustersAtCurrentZoom(this.slicedNodes, sizeFunction);
 
     this.rebuildForceModel();
 
@@ -2152,7 +2364,7 @@ SVGOverlay.prototype.onRemove = function () {
 //called on zoom events and initial load
 SVGOverlay.prototype.draw = function () {
 
-    console.log("draw_call");
+    //console.log("draw_call");
 
 };
 
@@ -2163,36 +2375,22 @@ SVGOverlay.prototype.clearPopovers = function () {
 
 
 
-SVGOverlay.prototype.drawSingletons = function (single, bounds, viewSize, viewSizeChanged) {
+
+SVGOverlay.prototype.drawPaths = function (over, bounds) {
 
     var projection = this.getProjection();
     var svg = d3.select("#region_overlay");
 
 
-    svg.selectAll("circle.singleton").data(single).enter().append("circle")
-        .attr("class", "datapoint singleton")
-        .attr('r', 4);
+    let orig_corner_proj = projection.fromLatLngToContainerPixel(STARTING_ZOOM_SW_REF);
+    let cur_corner_proj = projection.fromLatLngToContainerPixel(bounds.getSouthWest());
+    let translate_x = orig_corner_proj.x - cur_corner_proj.x;
+    let translate_y = orig_corner_proj.y - cur_corner_proj.y;
+    svg.style("transform","translate("+Math.floor(translate_x)+"px,"+Math.floor(translate_y)+"px)");
 
-    svg.selectAll("circle.singleton").data(single).exit().remove();
-
-    svg.selectAll("circle.singleton").each( function (d,i) {
-        let proj = d.getCenterDProj(LATVAL, LONVAL, projection);
-        d3.select(this).attr('cx',proj[0])
-                       .attr('cy',proj[1]);
-    });
-};
-
-SVGOverlay.prototype.drawPaths = function (over, bounds, viewSize, viewSizeChanged) {
-
-    var projection = this.getProjection();
-    var svg = d3.select("#region_overlay");
 
     svg.selectAll("path.group").data(over).enter().append("path")
-        .attr("class", "datapoint group")
-        .attr('opacity', '0.6')
-        .attr('fill', 'none')
-        .attr('stroke', '#888')
-        .attr('stroke-width', '3px');
+        .attr("class", "datapoint group");
         //.attr("d", function(d) {return d.getPathDProj(LATVAL, LONVAL, projection);});
 
     svg.selectAll("path.group").data(over).exit().remove();
@@ -2201,21 +2399,35 @@ SVGOverlay.prototype.drawPaths = function (over, bounds, viewSize, viewSizeChang
     //if (viewSizeChanged) {
         //console.log("buildpaths");
 
-        svg.selectAll("path.group")
-            .attr("d", function(d) {return d.getPathDProj(LATVAL, LONVAL, projection);});
-            /*.on("mouseover", function(d) {
-                d3.select(".tooltip").transition()
-                    .duration(200)
-                    .style("opacity", .9);
-                d3.select(".tooltip").html(d.id)
-                    .style("left", (d3.event.pageX) + "px")
-                    .style("top", (d3.event.pageY - 28) + "px");
-                })
-            .on("mouseout", function(d) {
-                d3.select(".tooltip").transition()
-                    .duration(500)
-                    .style("opacity", 0);
-            });*/
+    svg.selectAll("path.group").each( function(d,i) {
+
+        let nid = d3.select(this).attr("c_id");
+        if (parseInt(nid) != d.id) {
+            //redraw
+            d3.select(this).style("transform", "translate("+Math.floor(-translate_x)+"px,"+Math.floor(-translate_y)+"px)")
+                    .attr("d", function(d) {return d.getPathDProj(LATVAL, LONVAL, projection);})
+                    .attr("c_id",d.id);
+
+
+        }
+        else {
+            //do nothing
+        }
+
+    });
+        /*.on("mouseover", function(d) {
+            d3.select(".tooltip").transition()
+                .duration(200)
+                .style("opacity", .9);
+            d3.select(".tooltip").html(d.id)
+                .style("left", (d3.event.pageX) + "px")
+                .style("top", (d3.event.pageY - 28) + "px");
+            })
+        .on("mouseout", function(d) {
+            d3.select(".tooltip").transition()
+                .duration(500)
+                .style("opacity", 0);
+        });*/
     //}
 
     //translate them to the proper place without rewriting path (delta from path center to now)
@@ -2270,7 +2482,7 @@ SVGOverlay.prototype.drawSimplePathCanvas = function () {
 
 
 
-SVGOverlay.prototype.drawPathCanvases = function (tiles, bounds) {
+SVGOverlay.prototype.drawPointwiseCanvases = function (tiles, bounds) {
 
     //might be faster to draw it all on one big canvas!
     //or use some kind of screen tiling system to queue up stuff that isn't quite onscreen
@@ -2279,6 +2491,13 @@ SVGOverlay.prototype.drawPathCanvases = function (tiles, bounds) {
     var projection = this.getProjection();
     var container = d3.select("#canvasContainer");
     let zoom = this.map.getZoom();
+
+    //manage the translation currently on the container
+    let orig_corner_proj = projection.fromLatLngToContainerPixel(STARTING_ZOOM_SW_REF);
+    let cur_corner_proj = projection.fromLatLngToContainerPixel(bounds.getSouthWest());
+    let translate_x = orig_corner_proj.x - cur_corner_proj.x;
+    let translate_y = orig_corner_proj.y - cur_corner_proj.y;
+    container.style("transform","translate("+Math.floor(translate_x)+"px,"+Math.floor(translate_y)+"px)");
 
 
     container.selectAll("div.canvasWrapper").data(tiles).enter().append("div")
@@ -2310,7 +2529,7 @@ SVGOverlay.prototype.drawPathCanvases = function (tiles, bounds) {
         else { sameNode = false; }
 
         if (!sameNode || z === "" || parseInt(z) != zoom) {
-            console.log("redrawing tile");
+            //console.log("redrawing tile");
             d3.select(this).property(" __prevNodes__", function(d){ return d.node_id; } );
 
             d3.select(this).attr("z_level", zoom);
@@ -2319,10 +2538,6 @@ SVGOverlay.prototype.drawPathCanvases = function (tiles, bounds) {
 
             canvas.width = d.tile_sz+(d.overflow*2);
             canvas.height = d.tile_sz+(d.overflow*2);
-
-
-
-
 
 
             let ctx = canvas.getContext('2d');
@@ -2354,9 +2569,13 @@ SVGOverlay.prototype.drawPathCanvases = function (tiles, bounds) {
 
         //d3.select(this).style("top", (d.upperLeft.y) + "px")
         //               .style("left", (d.upperLeft.x) + "px");
-        d3.select(this).style("transform", "translate("+parseInt(d.proj.x - d.overflow)+"px,"+parseInt(d.proj.y - d.overflow)+"px)")
-                        .style("top", 0 + "px")
-                       .style("left", 0+ "px");
+        if (Math.floor(d.proj.y - d.overflow-translate_y) != parseInt(d3.select(this).style('top'))) {
+            d3.select(this).style("top", Math.floor(d.proj.y - d.overflow-translate_y)+"px");
+        }
+        if (Math.floor(d.proj.x - d.overflow-translate_x) != parseInt(d3.select(this).style('left'))) {
+            d3.select(this).style("left", Math.floor(d.proj.x - d.overflow-translate_x)+"px");
+        }
+
 
 
 
@@ -2383,6 +2602,10 @@ SVGOverlay.prototype.drawPathLabels = function (over, bounds, viewSize, viewSize
     var projection = this.getProjection();
     var svg = d3.select("#region_overlay");
     let defs = d3.select('#path_defs');
+
+
+
+
 
     defs.selectAll("path.outline").data(over).enter().append("path")
         .attr("class", "datapoint outline");
@@ -2533,73 +2756,13 @@ SVGOverlay.prototype.drawPathLabels = function (over, bounds, viewSize, viewSize
 
 };
 
-SVGOverlay.prototype.drawQuantBins = function (over, bounds, viewSize, viewSizeChanged) {
-
-    var projection = this.getProjection();
-    var svg = d3.select("#region_overlay");
-    let defs = d3.select('#path_defs');
-
-    //clip paths to truncate drawing of density
-    svg.selectAll("clipPath.groupClip").data(over).enter().append("clipPath")
-        .attr("class", "groupClip")
-        .append("path");
-
-    svg.selectAll("clipPath.groupClip").data(over).exit().remove();
-
-    svg.selectAll("clipPath.groupClip")
-        .attr("id", function(d) {return "clip_"+d.id;})
-        .select("path")
-        .attr("d", function(d) {return d.getPathDProj(LATVAL, LONVAL, projection);});
-
-
-
-    //density squares
-    //var ratingScale = getScaleForDatatype(this.data, "rating", 1);
-
-    let w = d3.select("#map").node().getBoundingClientRect().width;
-    let h = d3.select("#map").node().getBoundingClientRect().height;
-
-    svg.selectAll("g.quant").data(over).enter().insert("g", ":first-child")
-       .attr("class", "quant");
-
-    svg.selectAll("g.quant").data(over).exit().remove();
-
-    svg.selectAll("g.quant")
-        .attr("clip-path", function(d) {return 'url(#clip_'+d.id+')';})
-        .each( function(d, i) {
-        let g = d3.select(this);
-        let t = quantizeNode(d,LATVAL,LONVAL, w, h, projection);
-        let bins = t[0];
-        let max = t[1];
-
-        let avg = 0;
-        for (let nn of d.data_rows) {
-            avg = avg + d.data_src[nn]["rating"];
-        }
-        avg = avg / d.data_rows.length;
-        //console.log(avg)
-
-        g.selectAll("rect.bin").data(bins).enter().append("rect")
-         .attr("class","bin")
-         //.attr("fill", function(d) { return d3.interpolateBlues(((d.data_rows.length / max)*0.5) + 0.5); })
-         //.attr("opacity", "0.2");
-        .attr("fill", "#69D")
-        .attr("opacity", function(d) { return 0.2 + 0.4 * (d.data_rows.length / max);  });
-
-        g.selectAll("rect.bin").data(bins).exit().remove();
-
-        g.selectAll('rect.bin').each( function(e,j) {
-            d3.select(this).attr("x",e.x-e.size)
-             .attr("y",e.y-e.size)
-             .attr("width",e.size*2)
-             .attr("height",e.size*2);
-
-        });
-    });
-
-};
 
 SVGOverlay.prototype.drawRecommended = function (recommended_nodes, bounds) {
+
+    if (!SHOULD_SHOW_POPOVERS) {
+        recommended_nodes = [];
+        this.clearPopovers();
+    }
 
     var projection = this.getProjection();
     var svg = d3.select("#recommendation_overlay");
@@ -2625,12 +2788,16 @@ SVGOverlay.prototype.repositionRecommended = function (bounds) {
     var projection = this.getProjection();
     var svg = d3.select("#recommendation_overlay");
 
-    svg.selectAll("circle.recommended").each( function (d,i) {
+    svg.selectAll("circle.recommended").each( function (fn,i) {
+        let d = fn.node_ref;
         let latLng = new google.maps.LatLng(d.data_src[d.data_rows[0]][LATVAL], d.data_src[d.data_rows[0]][LONVAL]);
         let loc = projection.fromLatLngToContainerPixel(latLng);
 
         d3.select(this).attr('cx',loc.x)
-                       .attr('cy',loc.y);
+                       .attr('cy',loc.y)
+                       .style("fill", fn.color_string);
+
+
     });
 
 };
@@ -2660,78 +2827,43 @@ SVGOverlay.prototype.repositionRecommended = function (bounds) {
 
 
 
-SVGOverlay.prototype.updateRegionView = function (bounds, viewSize, viewSizeChanged) {
-
-    //agnostic to any zoom/pan level, just updates according to standard heuristics
-
-    //mark circle elements for singletons
-    var single = this.slicedNodes.filter(function(d) { return (d.data_rows.length < 2) &&
-                                                              (d.isOnScreenPadded); });
-
-    this.drawSingletons(single, bounds, viewSize, viewSizeChanged);
-
-    //mark path elements for groups
-    let over = this.slicedNodes.filter(function(d) { return (d.data_rows.length >= 2) &&
-                                                            (d.isOnScreenPadded); });
-
-    this.drawPaths(over, bounds, viewSize, viewSizeChanged);
 
 
-    //labels for paths
-    //this.drawPathLabels(over, bounds, viewSize, viewSizeChanged);
-
-
-    //quantitative bins
-    //CANCEL FOR NOW
-    //this.drawQuantBins(over, bounds, viewSize, viewSizeChanged);
-
-
-/*
-    var svg = d3.select("#region_overlay");
-        var projection = this.getProjection();
-    var debugLayer = svg.selectAll("circle.debug")
-                        .data(LEAF_NODES);
-    debugLayer.enter().append("circle")
-            .attr("class", "debug")
-            .attr('fill', '#888')
-            .attr('stroke', '#444')
-            .attr('stroke-width', '1px')
-            .attr('opacity', '0.5')
-            .attr('r', 2);
-    debugLayer.exit().remove();
-
-    d3.select("#region_overlay").selectAll("circle.debug").each( function (d,i) {
-        let proj = d.getCenterDProj(LATVAL, LONVAL, projection);
-        d3.select(this).attr('cx',proj[0])
-                       .attr('cy',proj[1]);
-    });*/
-
-
-
-
-};
-
-
-SVGOverlay.prototype.redrawRegionView = function (bounds) {
+SVGOverlay.prototype.redrawRegionView = function (old_bounds, new_bounds) {
     //console.log("redraw");
     //ought to move everything from update to redraw/translate for better performance
     //also need better cleaning/identifying things that are going to be onscreen
 
-
-    //var single = this.slicedNodes.filter(function(d) { return (d.data_rows.length < 2) &&
-    //                                                          (d.isOnScreen); });
-    let over = this.slicedNodes.filter(function(d) { return (d.data_rows.length >= 2) &&
-                                                            (d.isOnScreenPadded); });
+    let projection = this.getProjection();
+    let bounds = this.map.getBounds();
 
 
-    if (this.currentCanvasTiles) {
-        let tiles = this.fetchOnlyOnscreenTilesAndRender(this.currentCanvasTiles, this.map.getBounds(), false, {});
-        this.drawPathCanvases(tiles, bounds);
-    }
-    else {
-        this.currentCanvasTiles = this.getCanvasTilesForClustersAtCurrentZoom(over);
-        let tiles = this.fetchOnlyOnscreenTilesAndRender(this.currentCanvasTiles, this.map.getBounds(), false, {});
-        this.drawPathCanvases(tiles, bounds);
+    this.drawPaths(CLUSTERS_ONSCREEN.clusters, bounds);
+
+    //just move around the recommended circle
+
+    //let tiles = this.fetchOnlyOnscreenTilesAndRender(this.currentCanvasTiles, this.map.getBounds(), false, {});
+    //this.drawPointwiseCanvases(tiles, bounds);
+    let colorFunction = function(rows) {
+        let v = DESC_STATS['rating'].scale(DATASET[rows[0]]['rating']);
+        if (v < 0.5) {
+            return d3.interpolateLab("#d8342c","#f2f2f2")(v*2.0);
+        }
+        else {
+            return d3.interpolateLab("#f2f2f2","#4a76b5")((v-0.5)*2.0);
+        }
+    };
+    this.updateSVGCirclesOnScreen();
+
+
+    if (old_bounds) {
+
+        let old_proj = projection.fromLatLngToContainerPixel(old_bounds.getSouthWest());
+        let new_proj = projection.fromLatLngToContainerPixel(new_bounds.getSouthWest());
+
+        let offset = {x: new_proj.x - old_proj.x, y: new_proj.y - old_proj.y};
+
+        this.repositionRecommended(bounds);
     }
 
     //draw the canvases
@@ -2744,7 +2876,7 @@ SVGOverlay.prototype.translateRegionView = function (old_bounds, new_bounds) {
 
     //need to implement pass to check if need to render new items that have come onscreen
 
-    console.log("translate");
+    //console.log("translate");
     let projection = this.getProjection();
     let bounds = this.map.getBounds();
 
@@ -2754,74 +2886,28 @@ SVGOverlay.prototype.translateRegionView = function (old_bounds, new_bounds) {
     let offset = {x: new_proj.x - old_proj.x, y: new_proj.y - old_proj.y};
 
 
-    //just move around the recommended circle
-    this.repositionRecommended(bounds);
 
+    let colorFunction = function(rows) {
+        let v = DESC_STATS['rating'].scale(DATASET[rows[0]]['rating']);
+        if (v < 0.5) {
+            return d3.interpolateLab("#d8342c","#f2f2f2")(v*2.0);
+        }
+        else {
+            return d3.interpolateLab("#f2f2f2","#4a76b5")((v-0.5)*2.0);
+        }
+    };
+    this.updateSVGCirclesOnScreen();
 
+/*
     if (this.currentCanvasTiles) {
         let tiles = fetchOnlyOnscreenTilesAndRender(this.currentCanvasTiles, this.map.bounds, false, {});
-        this.drawPathCanvases(tiles, bounds);
+        this.drawPointwiseCanvases(tiles, bounds);
     }
     else {
         this.currentCanvasTiles = getCanvasTilesForClustersAtCurrentZoom(over);
         let tiles = fetchOnlyOnscreenTilesAndRender(this.currentCanvasTiles, this.map.bounds, false, {});
-        this.drawPathCanvases(tiles, bounds);
-    }
-
-
-
-}
-
-
-SVGOverlay.prototype.onMouseClick = function (e) {
-
-
-
-
-
-
-
-
-    let projection = this.getProjection();
-    let loc = projection.fromLatLngToContainerPixel(e.latLng);
-    console.log(e.latLng.lat(),e.latLng.lng());
-    let x = Math.round(Math.abs(loc.x));
-    let y= Math.round(Math.abs(loc.y));
-
-    let scores = scoreNodes(DATASET, this.slicedNodes);
-
-    rankLeaves(LEAF_NODES, this.map.getBounds());
-
-    d3.selectAll("path.group").each(function(d,i) {
-
-
-        if (d.checkContainment(LATVAL,LONVAL,[e.latLng.lat(),e.latLng.lng()])) {
-
-
-
-            console.log(clusterStats(d));
-
-
-            let lst = d3.select("#datadump").html("").append("ul");
-            let score = RAW_SCORES;
-
-            //console.log(score);
-            for (let col of VALID_NUM_COLUMNS) {
-                lst.append("li").text(col+": M"+score.means[d.id][col]+" E"+score.errors[d.id][col]);
-            }
-            for (let col of VALID_NOM_COLUMNS) {
-                for (let term in score.tfidf[d.id][col]) {
-                    if (score.tfidf[d.id][col][term] > 0.1) {
-                        lst.append("li").text(term+": "+score.tfidf[d.id][col][term]);
-                    }
-                }
-            }
-
-
-        }
-
-
-    });
+        this.drawPointwiseCanvases(tiles, bounds);
+    }*/
 
 
 
@@ -2830,6 +2916,329 @@ SVGOverlay.prototype.onMouseClick = function (e) {
 
 
 
+
+var CURSOR_MAX_RAD = 18;
+var CURSOR_MAX_RAD2 = CURSOR_MAX_RAD * 2;
+
+SVGOverlay.prototype.onMouseMove = function (e) {
+
+    let projection = OVERLAY.getProjection();
+    let loc = projection.fromLatLngToContainerPixel(e.latLng);
+    let translate_x = parseInt($("#circles_overlay").attr("t_x"));
+    let translate_y = parseInt($("#circles_overlay").attr("t_y"));
+    let mx = Math.round(Math.abs(loc.x)) - translate_x;
+    let my = Math.round(Math.abs(loc.y)) - translate_y;
+    //console.log(translate_x, translate_y);
+
+    //define bounding box for
+    let left = mx - CURSOR_MAX_RAD;
+    let right = mx + CURSOR_MAX_RAD;
+    let top = my - CURSOR_MAX_RAD;
+    let bot = my + CURSOR_MAX_RAD;
+
+    let closestContain = null;
+    let closestContainD = Number.MAX_VALUE;
+    let closestIntersect = null;
+    let closestIntersectD = Number.MAX_VALUE;
+    let secondClosestIntersect = null;
+    let secondClosestIntersectD = Number.MAX_VALUE;
+    let cont = [];
+    circle_quad_tree.visit(function(node, x1, y1, x2, y2) {
+    if (!node.length) {
+      do {
+        let d = node.data;
+        let x = d.x;
+        let y = d.y;
+        if (d.opaque && (x >= left) && (x < right) && (y >= top) && (y < bot)) {
+            let dist = Math.sqrt((x - mx) * (x - mx) + (y - my) * (y - my));
+            let intersect = Math.abs(dist);
+            let contain = Math.abs(dist+d.r);
+            if (dist < d.r) {
+                intersect = d.r-dist;
+            }
+                cont.push(d.i + " - " +dist);
+
+            if (contain < closestContainD) {
+                closestContain = node.data;
+                closestContainD = contain;
+            }
+
+            if (intersect < closestIntersectD) {
+                secondClosestIntersect = closestIntersect;
+                secondClosestIntersectD = closestIntersectD;
+                closestIntersect = node.data;
+                closestIntersectD = intersect;
+            }
+
+        }
+      } while (node = node.next);
+    }
+    return x1 >= right || y1 >= bot || x2 < left || y2 < top;
+    });
+    //console.log(cont)
+
+
+    $("#circles_overlay circle.selected").removeClass("selected");
+    $("#tooltips").empty();
+
+    if (closestContain == null && secondClosestIntersect == null) {
+        d3.select("#bubblecursor").remove();
+    }
+    else {
+
+        //modify the radius so we get a cleaner selection
+        let bubblerad = Math.round(Math.max(1, Math.min(closestContainD, secondClosestIntersectD) - closestIntersect.r*0.25));
+
+        let inside = bubblerad <= closestIntersect.r;
+
+        if ($("#bubblecursor").length < 1) {
+            d3.select("#selection_overlay").append("circle")
+                                           .attr("id","bubblecursor");
+        }
+        //console.log(closestIntersect.i)
+        d3.select("#bubblecursor").attr('cx', mx + translate_x)
+                                  .attr('cy', my + translate_y)
+                                  .attr('r', bubblerad);
+
+        $("#circles_overlay circle[i='"+closestIntersect.i+"']").addClass("selected");
+        /*
+        d3.select("#bubblecursor").attr('cx', closestIntersect.x+translate_x)
+                                  .attr('cy', closestIntersect.y+translate_y)
+                                  .attr('r', bubblerad);*/
+
+        let virtualrad = Math.max(20, bubblerad);
+
+        /*
+        console.log(Math.atan2((closestIntersect.y-my), (closestIntersect.x-mx)) + Math.PI/2);
+
+        let d = Math.sqrt((mx-closestIntersect.x)*(mx-closestIntersect.x) +
+                      (my-closestIntersect.y)*(my-closestIntersect.y));
+        let a = (virtualrad*virtualrad - closestIntersect.r*closestIntersect.r + d*d)/(2*d);
+        let h = Math.sqrt(virtualrad*virtualrad - a*a);
+        let p2x = mx + ((closestIntersect.x - mx) * a / d);
+        let p2y = my + ((closestIntersect.y - my) * a / d);
+
+        let opposite_x = 2*mx - p2x;
+        let opposite_y = 2*my - p2y;*/
+
+        let leftcorner = mx > $("#mapSVG").width()/2.0;//mx-p2x > 0;
+        //console.log($("#mapSVG").width()/2.0)
+
+
+        let nodes = [];
+        for (let row of closestIntersect.data_rows) {
+            nodes.push(LEAFROW_TO_NODE[row]);
+        }
+        nodes.sort(function(a,b) {return (a.rank-b.rank);})
+        nodes = nodes.slice(0,5);
+
+        let tips = d3.select("#tooltips");
+
+        tips.selectAll(".popover-wrapper").data(nodes).enter().append("div").attr("class","popover-wrapper").attr("node_id",-1);
+        tips.selectAll(".popover-wrapper").data(nodes).exit().remove()
+        tips.selectAll(".popover-wrapper").each(function(d, i) {
+
+            if (d.id != parseInt(d3.select(this).attr("node_id"))) {
+                //changed contents
+                d3.select(this).empty;
+                OVERLAY.fillSelectionPopover(d, d3.select(this).node());
+            }
+
+            //console.log(nodes.indexOf(d));
+            let opposite_y;
+            let opposite_x;
+            let index = nodes.indexOf(d);
+            if (nodes.length == 1) {
+                opposite_x = mx + translate_x + 40 * Math.cos((1-leftcorner)*Math.PI);
+                opposite_y = my + translate_y + 40 * Math.sin(0);
+
+            }
+            else if (index === 0) {
+                opposite_x = mx + translate_x + 80 * Math.cos((1-leftcorner)*Math.PI);
+                opposite_y = my + translate_y + 80 * Math.sin(0);
+            }
+            else if (index % 2 === 0) {
+                opposite_x = mx + translate_x + (20+84*Math.floor(index/2)) * Math.cos((1-leftcorner)*Math.PI+Math.PI*(0.3*Math.floor(index/2)));
+                opposite_y = my + translate_y + (20+84*Math.floor(index/2)) * Math.sin((1-leftcorner)*Math.PI+Math.PI*(0.3*Math.floor(index/2)));
+            }
+            else if (index % 2 === 1) {
+                opposite_x = mx + translate_x + (20+84*Math.floor(index/2+1)) * Math.cos((1-leftcorner)*Math.PI-Math.PI*(0.3*Math.floor(index/2+1)));
+                opposite_y = my + translate_y + (20+84*Math.floor(index/2+1)) * Math.sin((1-leftcorner)*Math.PI-Math.PI*(0.3*Math.floor(index/2+1)));
+
+            }
+
+            let top = opposite_y-$(this).find(".popover").height() / 2.0;
+
+            let left;
+            if (leftcorner) {
+                left = opposite_x;
+            }
+            else {
+                left = opposite_x-$(this).find(".popover").width();
+            }
+
+
+
+            $(this).find(".popover").css("top",top+"px")
+                                    .css("left",left+"px"   );
+
+        })
+
+
+
+    }
+
+
+
+
+
+
+
+
+    let cluster_candidate = null;
+    if (CLUSTERS_ONSCREEN && CLUSTERS_ONSCREEN.clusters) {
+        let i=CLUSTERS_ONSCREEN.clusters.length-1;
+        while (i>=0) {
+            let clust = CLUSTERS_ONSCREEN.clusters[i];
+            if (clust.checkContainment(LATVAL,LONVAL,[e.latLng.lat(),e.latLng.lng()])) {
+                cluster_candidate = clust;
+                break;
+            }
+            i--;
+        }
+        let cluster_id = -1;
+        if (cluster_candidate) { cluster_id = cluster_candidate.id; }
+        d3.selectAll("path.group")
+            .classed("highlighted",false)
+            .filter( function(d) { return d.id === cluster_id; })
+            .classed("highlighted",true);
+
+        if (cluster_candidate) {
+            this.peekCluster(cluster_candidate);
+        }
+
+    }
+
+
+};
+
+
+
+SVGOverlay.prototype.peekCluster = function (cluster) {
+
+
+
+};
+
+SVGOverlay.prototype.selectCluster = function (cluster) {
+    d3.selectAll("path.group")
+        .classed("selected",false)
+        .filter( function(d) { return d.id === cluster.id; })
+        .classed("selected",true);
+
+
+    let cluster_leaves = [];
+    for (let row of cluster.data_rows) {
+        cluster_leaves.push(LEAFROW_TO_NODE[row]);
+    }
+    this.updateSideBarWithLeaves(cluster_leaves, true);
+    this.updateRecommendedPopovers();
+
+    clusterStats(cluster);
+
+};
+
+SVGOverlay.prototype.deselectClusters = function () {
+
+    d3.selectAll("path.group")
+        .classed("selected",false);
+
+
+    this.updateSideBarWithLeaves(LEAVES_ONSCREEN, true);
+    this.updateRecommendedPopovers();
+
+};
+
+
+
+
+
+
+SVGOverlay.prototype.onMouseClick = function (e) {
+
+    /*
+
+
+    let projection = this.getProjection();
+    let loc = projection.fromLatLngToContainerPixel(e.latLng);
+    //console.log(e.latLng.lat(),e.latLng.lng());
+    let x = Math.round(Math.abs(loc.x));
+    let y= Math.round(Math.abs(loc.y));
+
+    //let scores = scoreNodes(DATASET, this.slicedNodes);
+
+    //rankLeaves(LEAF_NODES, this.map.getBounds());
+
+    let foundCluster = false;
+    d3.selectAll("path.group").each(function(d,i) {
+
+
+        if (d.checkContainment(LATVAL,LONVAL,[e.latLng.lat(),e.latLng.lng()])) {
+
+
+            foundCluster = true;
+            if (d3.select(this).classed("selected")) {
+                OVERLAY.deselectClusters();
+            }
+            else {
+                OVERLAY.selectCluster(d);
+            }
+
+
+            // console.log(clusterStats(d));
+            //
+            //
+            // let lst = d3.select("#datadump").html("").append("ul");
+            // let score = RAW_SCORES;
+            //
+            // //console.log(score);
+            // for (let col of VALID_NUM_COLUMNS) {
+            //     lst.append("li").text(col+": M"+score.means[d.id][col]+" E"+score.errors[d.id][col]);
+            // }
+            // for (let col of VALID_NOM_COLUMNS) {
+            //     for (let term in score.tfidf[d.id][col]) {
+            //         if (score.tfidf[d.id][col][term] > 0.1) {
+            //             lst.append("li").text(term+": "+score.tfidf[d.id][col][term]);
+            //         }
+            //     }
+            // }
+
+
+
+        }
+
+
+    });
+
+    if (!foundCluster) {
+        OVERLAY.deselectClusters();
+    }
+
+    */
+
+};
+
+
+
+
+
+
+
+
+
+
+
+//MARK ------------------------------LAYOUT FOR POPUPS
 
 
 
@@ -2992,11 +3401,11 @@ function boundedBox() {
 let PAD_NODES = 0;
 var force_nodes = []; //store all active nodes in simulation
 var force_links = [];
-var repelForce = d3.forceManyBody().strength(function(d) {return d.type == "pop" ? -0.01 : -0.005;});
+var repelForce = d3.forceManyBody().strength(function(d) {return d.isPop ? -0.1 : -0.04;});
 var linkForce = d3.forceLink().iterations(3);
 var centerForce = d3.forceCenter();
 var boundingForce = boundedBox().size(function (d) { return [d.width, d.height]; });
-var collideForce = rectCollide().strength(1).iterations(5).size(function (d) { return [d.width, d.height]; });
+var collideForce = rectCollide().strength(5).iterations(5).size(function (d) { return [d.width, d.height]; });
 var xForce = d3.forceX().strength(0.1);
 var yForce = d3.forceY().strength(0.1);
 
@@ -3013,8 +3422,8 @@ SVGOverlay.prototype.updateForceModelWithNewBounds = function (bounds) {
 
     //if we're gonna pad nodes, do it here to adapt to new bounds
 
-    repelForce.theta(0.001)
-                .distanceMax(latDist*0.3);
+    repelForce.theta(0.001*latDist)
+                .distanceMax(latDist*0.4);
 
     centerForce.x((lonMax+lonMin) / 2.0)
                .y((latMax+latMin) / 2.0);
@@ -3023,8 +3432,8 @@ SVGOverlay.prototype.updateForceModelWithNewBounds = function (bounds) {
 
     boundingForce.bounds([[lonMin+lonPad, latMin+latPadBot], [lonMax-lonPad, latMax-latPad]]);
 
-    xForce.x(function(d) {return d.type == "pop" ? d.l_x + (d.go_left ? -lonDist*0.2 : lonDist*0.2) : 0;});
-    yForce.y(function(d) {return d.type == "pop" ? d.l_y + latDist*0.2: 0;});
+    xForce.x(function(d) {return d.isPop ? d.l_x + (d.go_left ? -lonDist*0.26 : lonDist*0.15) : 0;});
+    yForce.y(function(d) {return d.isPop ? d.l_y + (d.go_up ? -latDist*0.15 : latDist*0.18): 0;});
 
     /*
     //only reset the model if we're applying boundingForce
@@ -3047,7 +3456,7 @@ function point2LatLng(x, y, projection, bounds, zoom) {
 SVGOverlay.prototype.rebuildForceModel = function () {
     //everything done in lat/lng until we hit position update step
     //always reconstruct FORCE_MODEL
-    console.log("REBUILD FORCE")
+    //console.log("REBUILD FORCE")
 
     let projection = this.map.getProjection();
     let bounds = this.map.getBounds();
@@ -3071,10 +3480,6 @@ SVGOverlay.prototype.rebuildForceModel = function () {
     let p2 = point2LatLng(10,0,projection,bounds,zoom);
     let circle_width = Math.abs(p2.lng() - p1.lng());
     let circle_height = Math.abs(p2.lat() - p1.lat());
-    p1 = point2LatLng(0,0,projection,bounds,zoom);
-    p2 = point2LatLng(210,85,projection,bounds,zoom);
-    let pop_width = Math.abs(p2.lng() - p1.lng());
-    let pop_height = Math.abs(p2.lat() - p1.lat());
 
     let i;
     force_nodes = [];
@@ -3084,6 +3489,14 @@ SVGOverlay.prototype.rebuildForceModel = function () {
     while (i>=0) {
         let node = this.popoverNodes[i];
         let centroid = node.getHullCentroid(LATVAL, LONVAL);
+
+        let w = Math.max(144, 24 + Math.min(node.data_src[node.data_rows[0]]['name'].length, 24) * 11);
+        let h = (node.data_src[node.data_rows[0]]['name'].length > 24 ? 116 : 98);
+        p1 = point2LatLng(0,0,projection,bounds,zoom);
+        p2 = point2LatLng(w,h,projection,bounds,zoom);
+        let pop_width = Math.abs(p2.lng() - p1.lng());
+        let pop_height = Math.abs(p2.lat() - p1.lat());
+
         let fn = {type : "leaf",
                     x : centroid[1]-circle_width,
                     y : centroid[0]-circle_height,
@@ -3095,6 +3508,7 @@ SVGOverlay.prototype.rebuildForceModel = function () {
                     node_id : node.id,
                     node_ref : node};
         let n = {type : "pop",
+                    isPop : true,
                     x : centroid[1] - pop_width/2.0 + Math.random()*0.01-0.005,
                     y : centroid[0] - pop_height/2.0 + Math.random()*0.01-0.005,
                     width : pop_width,
@@ -3103,8 +3517,11 @@ SVGOverlay.prototype.rebuildForceModel = function () {
                     l_y : centroid[0]-circle_width,
                     fixed : true,
                     go_left : Math.random() > 0.5,
+                    go_up : Math.random() > 0.5,
                     node_id : node.id,
-                    node_ref : node};
+                    node_ref : node,
+                    color_string : POPOVER_PALETTE[PALETTE_INDEX]};
+        PALETTE_INDEX = (PALETTE_INDEX + 1) % POPOVER_PALETTE.length;
         let l = {source : fn,
                  target : n};
 
@@ -3149,7 +3566,7 @@ SVGOverlay.prototype.rebuildForceModel = function () {
                      //.force("repelForce",repelForce)
                      //.force("linkForce",linkForce)
                      //.force("centerForce",centerForce)
-                     //.force("boundingForce",boundingForce)
+                     .force("boundingForce",boundingForce)
                      .force("xF",xForce)
                      .force("yF",yForce)
                      .force("collideForce",collideForce)
@@ -3163,7 +3580,7 @@ SVGOverlay.prototype.rebuildForceModel = function () {
 
 
 SVGOverlay.prototype.iterateForceAndUpdatePopups = function (animate) {
-    console.log("iterate");
+    //console.log("iterate");
 
     //record previous positions for nodes
     let i=force_nodes.length-1;
@@ -3181,7 +3598,7 @@ SVGOverlay.prototype.iterateForceAndUpdatePopups = function (animate) {
         FORCE_MODEL.alpha(1);
 
         let iters = 0;
-        while(iters < 10) {
+        while(iters < 20) {
             FORCE_MODEL.tick();
             iters++;
         }
@@ -3217,8 +3634,11 @@ SVGOverlay.prototype.addPopoverToSimulation = function (popNode) {
     let p2 = point2LatLng(10,10,projection,bounds,zoom);
     let circle_width = Math.abs(p2.lng() - p1.lng());
     let circle_height = Math.abs(p2.lat() - p1.lat());
+
+    let w = Math.max(144, 24 + Math.min(popNode.data_src[popNode.data_rows[0]]['name'].length, 24) * 11);
+    let h = (popNode.data_src[popNode.data_rows[0]]['name'].length > 24 ? 116 : 98);
     p1 = point2LatLng(0,0,projection,bounds,zoom);
-    p2 = point2LatLng(210,85,projection,bounds,zoom);
+    p2 = point2LatLng(w,h,projection,bounds,zoom);
     let pop_width = Math.abs(p2.lng() - p1.lng());
     let pop_height = Math.abs(p2.lat() - p1.lat());
 
@@ -3235,6 +3655,7 @@ SVGOverlay.prototype.addPopoverToSimulation = function (popNode) {
                 node_id : popNode.id,
                 node_ref : popNode};
     let n = {type : "pop",
+                isPop : true,
                 x : centroid[1] - pop_width/2.0 + Math.random()*0.01-0.005,
                 y : centroid[0] - pop_height/2.0 + Math.random()*0.01-0.005,
                 width : pop_width,
@@ -3243,11 +3664,13 @@ SVGOverlay.prototype.addPopoverToSimulation = function (popNode) {
                 l_y : centroid[0]-circle_width,
                 fixed : true,
                 go_left : Math.random() > 0.5,
+                go_up : Math.random() > 0.5,
                 node_id : popNode.id,
-                node_ref : popNode};
+                node_ref : popNode,
+                color_string : POPOVER_PALETTE[PALETTE_INDEX]};
+    PALETTE_INDEX = (PALETTE_INDEX + 1) % POPOVER_PALETTE.length;
     let l = {source : fn,
              target : n};
-
     force_nodes.push(fn);
     force_nodes.push(n);
     force_links.push(l);
@@ -3282,12 +3705,13 @@ SVGOverlay.prototype.removePopoverFromSimulation = function (popNode) {
 };
 
 
+
 SVGOverlay.prototype.updatePopoverObjectsFromForce = function (animateAddRem, animateMove) {
     animateAddRem = false;
 
     //use enter/exit to create and destroy popupwrappers and links
     var projection = this.getProjection();
-    let pop = force_nodes.filter(function(d) {return d.type == "pop";});
+    let pop = force_nodes.filter(function(d) {return d.isPop;});
     let popoverContainer = d3.select("#popoverContainer");
     let popoverLineContainer = d3.select("#popoverLines");
 
@@ -3309,7 +3733,6 @@ SVGOverlay.prototype.updatePopoverObjectsFromForce = function (animateAddRem, an
                 .attr("placed", "f")
                 .attr("class","edge")
                 .attr("fill","none")
-                .attr("stroke", "rgba(30, 80, 120, 0.9)")
                 .attr("stroke-width", "2px")
                 .each(function() {
                     if (animateAddRem) {
@@ -3338,6 +3761,9 @@ SVGOverlay.prototype.updatePopoverObjectsFromForce = function (animateAddRem, an
         //update content
         OVERLAY.updateNotePopoverContent(d.node_ref, this);
 
+        d3.select(this).select(".popover").style("background-color", d.color_string)
+                       .select(".expandLabel").style("background-color", d.color_string);
+
         //popover loc
         let old_latLng = new google.maps.LatLng(d.prev_y,d.prev_x);
         let old_upperLeft = projection.fromLatLngToContainerPixel(old_latLng);
@@ -3355,8 +3781,8 @@ SVGOverlay.prototype.updatePopoverObjectsFromForce = function (animateAddRem, an
         let lowerRight = projection.fromLatLngToContainerPixel(heiWid);
         let width = $(this).find(".infobox").outerWidth();
         let height = $(this).find(".infobox").outerHeight();
-        let screenwidth = $(this).parent().attr("width");
-        let screenheight = $(this).parent().attr("height");
+        let screenwidth = $(this).parent().innerWidth();
+        let screenheight = $(this).parent().innerHeight();
 
         //correct that lowerRight is actually the top (negative lon) HACK - probably depends on hemisphere
         let pos = {x: upperLeft.x, y: lowerRight.y};
@@ -3415,8 +3841,10 @@ SVGOverlay.prototype.updatePopoverObjectsFromForce = function (animateAddRem, an
             old_targetY = d.target.popover_old_upperLeft.y + d.target.popover_height - 3;
         }
 
-        d3.select(this).attr("x1", source2d.x - 8)
-                       .attr("y1", source2d.y - 8);
+        d3.select(this).attr("x1", source2d.x)
+                       .attr("y1", source2d.y)
+                       .style("stroke", d.target.color_string);
+
         if (animateMove) { //marker if popover never placed before
             $(this).attr({x2 : old_targetX, y2 : old_targetY})
                    .velocity({x2 : targetX, y2 : targetY}, 500, "swing");
@@ -3429,7 +3857,7 @@ SVGOverlay.prototype.updatePopoverObjectsFromForce = function (animateAddRem, an
 
 
 
-        d3.select(this).attr("placed","t");
+        d3.select(this).attr("placed","t")
 
     });
 
@@ -3440,7 +3868,7 @@ SVGOverlay.prototype.updatePopoverObjectsFromForce = function (animateAddRem, an
 
 };
 
-/*
+
 SVGOverlay.prototype.DEBUGupdatePopoverObjectsFromForce = function () {
 
 
@@ -3531,7 +3959,7 @@ SVGOverlay.prototype.DEBUGupdatePopoverObjectsFromForce = function () {
 
 
 
-};*/
+};
 
 
 
@@ -3556,49 +3984,294 @@ SVGOverlay.prototype.forceTick = function () {
 
 
 
+//MARK -------------------------- RANKINGS
 
 
 
 
-
+var SHOULD_SHOW_POPOVERS = false;
 var LEAF_RANKINGS = [];
 var SHOW_NODES = [];
 
-SVGOverlay.prototype.buildRankingSlider = function ( ) {
+//quickselect(leaves,i,0,leaves.length-1, function(a,b) { return a.rank-b.rank; });
 
-    $("#rankingSlider").rangeSlider({
-        range: {min:5,max:5},
-        step: 1,
-        defaultValues: {min:1,max:5}
+var LAST_COMPUTED_TARGET = null;
 
+
+
+
+
+
+
+
+
+
+
+
+//MARK ------------------------- SIDE BAR
+
+
+var LAST_COMPUTED_TARGET = null;
+SVGOverlay.prototype.updateSideBarWithLeaves = function (leafNodes, forceUpdate) {
+
+    let oldLeaves = this.sideBarLeaves;
+
+    this.sideBarLeaves = leafNodes;//.slice();
+    this.sideBarLeaves.sort(function(a,b) {return a.rank-b.rank;});
+
+    //check similarity
+    if (oldLeaves && !forceUpdate) {
+        let sameNodes = oldLeaves.length === leafNodes.length;
+        if (sameNodes) {
+            let i=oldLeaves.length-1;
+            while (i>=0) {
+                if (oldLeaves[i].id != leafNodes[i].id) {
+                    sameNodes = false;
+                    break;
+                }
+                i--;
+            }
+        }
+        if (sameNodes) {
+            return;
+        }
+    }
+    //console.log(leafNodes.length);
+
+    //store topmost node?
+
+    let temp = this;
+    $( ".recc-toggle" ).unbind('click').click(function() {return temp.toggleRecommendations();});
+
+    //prime the sidebar with a few nodes
+
+    $("#sidebar .rowPositioner").unbind("scroll");
+
+    let startingPos = 0;
+    let numToAdd = 5;
+    let startOffset = Math.max(0, startingPos-3);
+    let endOffset = Math.min(this.sideBarLeaves.length, startingPos+numToAdd+3);
+
+    //scrolled call will fill stuff in
+
+    $(".rowPositioner .padder").height( this.sideBarLeaves.length * 210 ); //210px tall
+    $(".rowPositioner").scrollTop( startingPos * 210 );
+
+    //set up the scroller
+    this.sideBarScrolled();
+    $("#sidebar .rowPositioner").scroll(function() {return temp.sideBarScrolled();});
+
+
+
+
+
+
+
+};
+
+
+
+
+SVGOverlay.prototype.rowElementForLeafNode = function (index, leafNode) {
+
+
+    let row = leafNode.data_rows[0];
+    let name = leafNode.data_src[row]['name'].trim();
+    let neighborhood = leafNode.data_src[row]['neighborhood'];
+    let categories = leafNode.data_src[row]['categories'];
+    let rating = leafNode.data_src[row]['rating'];
+    let ratingImg = rating.toFixed(1) + '.png';
+    let url = leafNode.data_src[row]['url'];
+    let highlights = leafNode.data_src[row]['highlights'];
+    let num_reviews = leafNode.data_src[row]['num_reviews'];
+    let images = leafNode.data_src[row]['images'];
+    let price = leafNode.data_src[row]['price'];
+
+    let rowContainer = $("<div>").addClass("row")
+                             .attr("nid", leafNode.id)
+                             .attr("i", index)
+                             .css("top", index * 210+"px");
+
+
+    let header = $("<div>").addClass("header");
+        header.append( $("<div>").addClass("rank").text(leafNode.rank));
+        header.append( $("<div>").addClass("title").append( $("<a>")
+                                    .attr("href",url)
+                                    .attr("target","_blank")
+                                    .text(name) ) );
+        header.append( $("<div>").addClass("tagline").append($("<span>").text(explainLeaf(leafNode)) ) );
+
+    let details = $("<div>").addClass("details");
+        details.append( $("<div>").addClass("top")
+               .append( $("<span>").addClass("rating")
+                    .append($("<img>").attr("src",ratingImg) ) ) );
+    details.children(".top").append( $("<span>").addClass("price spacer-before").text(price) );
+    if (neighborhood.length > 0) {
+        details.children(".top").append( $("<span>").addClass("neighborhood spacer-before").text(neighborhood) );
+    }
+    let b = $("<div>").addClass("bot") ;
+    details.append(b);
+    let i = 0;
+    while (i<categories.length-1) {
+        let cat = categories[i];
+        b.append( $("<span>").addClass("spacer-after no-overflow").text(cat) );
+        i++;
+    }
+    b.append( $("<span>").addClass("no-overflow").text(categories[categories.length-1]) );
+
+
+
+    let imageSlider = $("<div>").addClass("imageContainer");
+    let imagesList = $("<ul>").attr("id","imageList");
+    i=0;
+    while (i<images.length) {
+        imagesList.append($('<li>')
+                            .append($('<div>')
+                            .addClass('imageWrapper')
+                                .append($("<img>")
+                                .attr("src",images[i])
+                                .attr("width", "72px"))));
+        i++;
+    }
+    imageSlider.append(imagesList);
+
+    imagesList.lightSlider({
+        item: 1,
+        autoWidth: true,
+        slideMove: 1, // slidemove will be 1 if loop is true
+        slideMargin: -9,
+        gallery: false,
+        pager: false,
+        loop:false,
     });
-    $("#rankingSlider").bind("valuesChanging", this.rankingSliderChanged.bind(this));
 
-    this.computeNewLeafRankings();
+
+
+
+    rowContainer.append(header);
+    rowContainer.append(details);
+    rowContainer.append(imageSlider);
+
+
+    return rowContainer;
+
+};
+
+
+
+
+SVGOverlay.prototype.toggleRecommendations = function () {
+
+    SHOULD_SHOW_POPOVERS = !SHOULD_SHOW_POPOVERS;
+    $( "#show_reccs" ).prop( "checked", SHOULD_SHOW_POPOVERS );
+
+    if (SHOULD_SHOW_POPOVERS) {
+        this.sideBarScrolled(this.sideBarLeaves);
+    }
+    else {
+        SHOW_NODES = [];
+    }
     this.updateRecommendedPopovers();
 
+}
+
+var DELOAD_SPACING = 800; // this should be bigger than any row ought to be but not as big as 2 rows
+var RELOAD_SPACING = 500;
+
+var PRELOAD_PADDING = 300;
+var minScrollTime = 50;
+var scrollTimer, lastScrollFireTime = 0;
+var now = new Date().getTime();
+SVGOverlay.prototype.sideBarScrolled = function () {
+
+    //throttle scroll events a bit
+    let temp = this;
+    //function processScroll() {
+
+        let viewHeight = $(".rowPositioner").height();
+        let scrolltop = $(".rowPositioner").scrollTop();
+        let padder = $("#sidebar .rows .padder");
+
+        let topIndex = Math.max(0, Math.floor((scrolltop - PRELOAD_PADDING) / 210.0));
+        let botIndex = Math.min(temp.sideBarLeaves.length, Math.ceil((scrolltop + viewHeight + PRELOAD_PADDING) / 210.0));
+
+        let rows = $("#sidebar .rows");
+
+
+        //do this in a strange way because it ought to be faster to iterate
+        rows.children(".row").each( function() {
+
+            let i = $(this).attr("i");
+            if (i < topIndex || i >= botIndex) {
+                $(this).remove();
+            }
+
+        });
+
+        SHOW_NODES = [];
+        for (let i=topIndex; i<botIndex; i++) {
+
+            let e = rows.children(".row[i="+i+"]");
+            if (!e.length) { //if it's a new node, build it
+
+                e = temp.rowElementForLeafNode(i, temp.sideBarLeaves[i]);
+                let target = rows.children(".row[i="+(i-1)+"]");
+
+                if (!target.length) {
+                    padder.after(e);
+                }
+                else {
+                    target.after(e);
+                }
+
+                e.mouseenter(temp.mouseEnterRow);
+                e.mouseleave(temp.mouseLeaveRow);
+            }
+            else { //if it already exists, verify it hasn't changed
+                if (e.attr("nid") != temp.sideBarLeaves[i].id) {
+                    e.replaceWith(temp.rowElementForLeafNode(i, temp.sideBarLeaves[i]));
+                }
+            }
+
+            let top=e.offset().top;
+            let height=e.height();
+            if (top + (height/2.0) > 0 && top < viewHeight) {
+                SHOW_NODES.push(temp.sideBarLeaves[i]);
+            }
+
+        }
+
+
+        temp.updateRecommendedPopovers();
+
+
+        /*
+    }
+
+    //simple throttle
+    if (new Date().getTime() - now > 10)
+    {
+        now = new Date().getTime();
+        processScroll();
+    } */
+
+
+
+
+
+
+
 };
 
-
-SVGOverlay.prototype.computeNewLeafRankings = function ( ) {
-
-    let bounds = this.map.getBounds();
-
-    //boundsupdate should keep LEAVES_ONSCREEN going
-    LEAF_RANKINGS = rankLeaves(LEAVES_ONSCREEN, bounds);
-    //console.log(LEAF_RANKINGS);
-    $("#rankingSlider").rangeSlider("bounds", 1, LEAF_RANKINGS.length);
-
-    SHOW_NODES = [];
-    for (let i=$("#rankingSlider").rangeSlider('min')-1;
-             i<$("#rankingSlider").rangeSlider('max')-1;
-             i++) {
-         SHOW_NODES.push(LEAF_RANKINGS[i]);
-     }
-
-};
-
+var N_RECOMMENDATIONS = 5;
 SVGOverlay.prototype.updateRecommendedPopovers = function () {
+
+    if (!SHOULD_SHOW_POPOVERS) {
+        SHOW_NODES = [];
+    }
+
+    //poll for visibility on sidebar, take the top N
+
     /*
     let  l =[]
     for (let n of LEAVES_ONSCREEN) {
@@ -3614,7 +4287,6 @@ SVGOverlay.prototype.updateRecommendedPopovers = function () {
     console.log(l)*/
 
     //recommended circle highlight
-    this.drawRecommended(SHOW_NODES, this.map.getBounds());
 
     //this.refreshPopoversForNodes(recommended, bounds, viewSize, viewSizeChanged);
 
@@ -3644,20 +4316,796 @@ SVGOverlay.prototype.updateRecommendedPopovers = function () {
     if (changeFound) {
         this.iterateForceAndUpdatePopups(false);
     }
+
+    this.drawRecommended(force_nodes, this.map.getBounds());
     //MODIFY THE FORCE MODEL AS NEED BE
+
+}
+
+
+
+SVGOverlay.prototype.mouseEnterRow = function () {
+
+//make a fancy callout circle to overwrite canvas node
+//bold recommended popover if present
+
+    let row = NODEID_TO_NODE[parseInt($(this).attr("nid"))].data_rows[0];
+    let circle = datarowToCircle[row];
+    if (circle.htmlnode) {
+        let node = $(circle.htmlnode);
+        /*node.attr("old_stroke",node.attr("stroke"))
+            .attr("old_width",node.attr("stroke-width"))
+            .attr("stroke-width","3px")
+            .attr("stroke","#000");*/
+
+        let anim = d3.select("#animation_overlay").append("circle").node();
+        $(anim).attr("cx",node.attr("cx"))
+                .attr("cy",node.attr("cy"))
+                .attr("r",parseInt(node.attr("r"))+10)
+                .css("fill","none")
+                .css("stroke-width","4px")
+                .css("stroke", "#eb4f02")
+                .css("opacity", 1)
+                .velocity({
+                    "opacity" : 0,
+                    "r": 30,
+                }, {duration: 2000,
+                    easing: "ease-in",
+                    complete: function() {$(this).remove();}
+                });
+
+    }
+
 };
 
-SVGOverlay.prototype.rankingSliderChanged = function (e, data) {
+SVGOverlay.prototype.mouseLeaveRow = function () {
 
-    console.log("Values just changed. min: " + data.values.min + " max: " + data.values.max);
+    //hide callout circle
 
-    this.computeNewLeafRankings();
-    this.updateRecommendedPopovers();
+    /*
+    console.log(this);
+    let row = NODEID_TO_NODE[parseInt($(this).attr("nid"))].data_rows[0];
+    let circle = datarowToCircle[row];
+
+    if (circle.htmlnode) {
+        let node = $(circle.htmlnode);
+        node.attr("stroke-width",node.attr("old_width"))
+            .attr("stroke",node.attr("old_stroke-width"))
+            .removeAttr("old_stroke")
+            .removeAttr("old_width");
+    }*/
+
 
 };
 
 
 
+
+
+
+
+
+
+
+
+//arcx
+
+//--------------------------- FILTER WEIGHT SIDEBAR -----------------------
+
+class UserWeight {
+
+    constructor(ident, name, sortOrder, weightFunction) {
+        this.id = ident;
+        this.name = name;
+        this.isActive = false;
+        this.weightFunction = weightFunction.bind(this);
+                //function takes in [rows] and outputs {weight, color, scale, opaque, explanation}
+                //params can be missing from dict, but weight must be there
+                //-1 in color or size means they are discarded in calc
+        this.scalar = 1; //modifier to apply to weight later on -- user confidence metric
+        this.sortOrder = sortOrder; //0--lifestyle, 1--numeric, 2--nominative
+        this.booleanFilter = false;
+        this.needsNomColor = false;
+        this.needsLegend = false;
+        this.bgColor = null;
+
+        this.explanationsuffix = "restaurant";
+        this.intensityterms = ['not very', 'somewhat', '', "very"];
+    }
+
+}
+
+var DEFAULT_COLOR_SCALE = d3.interpolateViridis;
+var AVAILABLE_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
+"#bcbd22", "#17becf", "#aec7e8", "#ffbb78", "#98df8a", "#ff9896", "#c5b0d5", "#c49c94", "#f7b6d2", "#c7c7c7",
+ "#dbdb8d", "#9edae5"]
+ AVAILABLE_COLORS.reverse(); //reverse so we can push/pop in peace
+
+var activeWeights = [];
+var fallbackWeight = new UserWeight(-1, "default", -1, function(rows) {
+    return {weight: 1,
+            opaque: true,
+            color: DESC_STATS['rating'].scale(DATASET[rows[0]]['rating']),
+            size: DESC_STATS.log_num_reviews.scale(Math.log(DATASET[rows[0]].num_reviews))
+        };
+});
+var nullWeight = new UserWeight(-195, "nullweight", -2, function(rows) {
+    return {weight: 1,
+            opaque: false,
+            color: -1,
+            size: -1};
+});
+var weightList = [];
+var weightIDtoWeight = {};
+
+
+function populateWeights() {
+
+    let wID = 0;
+    //all the weights we have
+
+    let w = new UserWeight(wID, "Highly rated", 1, function(rows) {
+        let max = -1;
+        let i=rows.length-1;
+        while(i>=0) {
+            let v = DESC_STATS['rating'].scale(parseFloat(DATASET[rows[i]]['rating']));
+            if (v > max) { max = v; }
+            i--;
+        }
+        return {weight: max,
+                color: max,
+                size: max};
+    });
+    w.explanationsuffix = "highly rated"
+    weightList.push(w);
+    weightIDtoWeight[wID] = w;
+    wID++;
+    w = new UserWeight(wID, "Popular", 1, function(rows) {
+        let max = -1;
+        let i=rows.length-1;
+        while(i>=0) {
+            let v = DESC_STATS.log_num_reviews.scale(Math.log(DATASET[rows[0]].num_reviews));
+            if (v > max) { max = v; }
+            i--;
+        }
+        return {weight: max,
+                color: max,
+                size: max};
+    });
+    w.explanationsuffix = "popular"
+    weightList.push(w);
+    weightIDtoWeight[wID] = w;
+    wID++;
+    w = new UserWeight(wID, "Rarely reviewed", 1, function(rows) {
+        let min = 2;
+        let i=rows.length-1;
+        while(i>=0) {
+            let v = DESC_STATS.log_num_reviews.scale(Math.log(DATASET[rows[0]].num_reviews));
+            if (v < min) { min = v; }
+            i--;
+        }
+        return {weight: 1 - min,
+                color: 1 - min,
+                size: 1 - min};
+    });
+    w.explanationsuffix = "rarely reviewed"
+    weightList.push(w);
+    weightIDtoWeight[wID] = w;
+    wID++;
+    w = new UserWeight(wID, "Inexpensive", 1, function(rows) {
+        let min = 2;
+        let i=rows.length-1;
+        while(i>=0) {
+            let v = DESC_STATS['price_numeric'].scale(parseFloat(DATASET[rows[i]]['price_numeric']));
+            if (v < min) { min = v; }
+            i--;
+        }
+        return {weight: 1 - min,
+                color: 1 - min,
+                size: 1 - min};
+    });
+    w.explanationsuffix = "inexpensive"
+    weightList.push(w);
+    weightIDtoWeight[wID] = w;
+    wID++;
+    w = new UserWeight(wID, "Fancy", 1, function(rows) {
+        let max = -1;
+        let i=rows.length-1;
+        while(i>=0) {
+            let v = DESC_STATS['price_numeric'].scale(parseFloat(DATASET[rows[i]]['price_numeric']));
+            if (v > max) { max = v; }
+            i--;
+        }
+        return {weight: max,
+                color: max,
+                size: max};
+    });
+    w.explanationsuffix = "fancy"
+    weightList.push(w);
+    weightIDtoWeight[wID] = w;
+    wID++;
+    w = new UserWeight(wID, "Have bars nearby", 0, function(rows) {
+        let v = NEARBY_STATS.categories.counts[rows[0]]['Bars'];
+        if (v) {
+            let vn = NEARBY_STATS.categories.scales['Bars'](v);
+            return {weight: vn,
+                    color: vn,
+                    size: vn,
+                    opaque: true};
+        }
+        else {
+            return {weight: 0,
+                    color: -1,
+                    size: -1,
+                    opaque: false};
+        }
+    });
+    w.explanationsuffix = "bars nearby";
+    w.intensityterms = ['not many', 'a few', '', "lots of"];
+    weightList.push(w);
+    weightIDtoWeight[wID] = w;
+    wID++;
+    w = new UserWeight(wID, "Have dessert nearby", 0, function(rows) {
+        let v = NEARBY_STATS.categories.counts[rows[0]]['Desserts'];
+        if (v) {
+            let vn = NEARBY_STATS.categories.scales['Desserts'](v);
+            return {weight: vn,
+                    color: vn,
+                    size: vn,
+                    opaque: true};
+        }
+        else {
+            return {weight: 0,
+                    color: -1,
+                    size: -1,
+                    opaque: false};
+        }
+    });
+    w.explanationsuffix = "dessert places nearby";
+    w.intensityterms = ['not many', 'a few', '', "lots of"];
+    weightList.push(w);
+    weightIDtoWeight[wID] = w;
+    wID++;
+    w = new UserWeight(wID, "Have cafés nearby", 0, function(rows) {
+        let v = NEARBY_STATS.categories.counts[rows[0]]['Cafes'];
+        if (v) {
+            let vn = NEARBY_STATS.categories.scales['Cafes'](v);
+            return {weight: vn,
+                    color: vn,
+                    size: vn,
+                    opaque: true};
+        }
+        else {
+            return {weight: 0,
+                    color: -1,
+                    size: -1,
+                    opaque: false};
+        }
+    });
+    w.explanationsuffix = "cafés nearby";
+    w.intensityterms = ['not many', 'a few', '', "lots of"];
+    weightList.push(w);
+    weightIDtoWeight[wID] = w;
+    wID++;
+
+    //unusual cuisines
+    //best in area
+    //rising stars?
+
+
+    //do something more complex with genres
+
+    let cats = [];
+    for (let cat in DESC_STATS.categories.count) { cats.push(cat); }
+    cats.sort();
+
+    let CUTOFF = 3;
+    for (let cat of cats) {
+        if (DESC_STATS.categories.count[cat] < CUTOFF) {
+            continue;
+        }
+
+        w = new UserWeight(wID, cat, 2, function(rows) {
+            let found = false;
+            let i=rows.length-1;
+            while(i>=0) {
+                let y = DATASET[rows[i]]['categories'].length-1;
+                while (y>=0) {
+                    if (DATASET[rows[i]]['categories'][y] === cat) {
+                        found = true;
+                        break;
+                    }
+                    y--;
+                }
+                i--;
+            }
+
+            if (found) {
+                return {weight: 1,
+                        nomColor: this.bgColor,
+                        color: -1,
+                        size: -1,
+                        opaque: true};
+            }
+            else {
+                return {weight: 0,
+                        color: -1,
+                        size: -1,
+                        opaque: false};
+            }
+        });
+        w.needsNomColor = true; //IMPORTANT!
+        w.needsLegend = true;
+        weightList.push(w);
+        weightIDtoWeight[wID] = w;
+        wID++;
+
+    }
+
+    //default actives
+    //activeWeights = [ weightIDtoWeight[0], weightIDtoWeight[1] ];
+
+}
+
+
+
+/*
+    */
+
+
+function buildWeightRows() {
+
+
+
+    let $rows = $("#filterList");
+    for (let w of weightList) {
+
+        //applied
+        let row = $("<div>").addClass("filterRow").attr("wID",w.id);
+        row.append( $("<div>").addClass("label").text(w.name) );
+        row.append( $("<div>").addClass("addRemove")
+           .append( $("<input>").attr("type","checkbox")
+                                .attr("name","Add/Remove Row")
+                                .prop("colorSample", w.label_color != null)
+                                .addClass("arButton")) );
+
+                                if (w.needsNomColor) {
+                                    //maybe we actually create and assign the label color here...
+                                    row.append( $("<div>").addClass("colorSample").css("background-color", w.label_color) );
+                                }
+
+        $rows.append(row);
+    }
+    for (let w of weightList) {
+        let row = $rows.find(".filterRow[wID='"+w.id+"']");
+
+        //defaults set
+        let active = false;
+        for (let aw of activeWeights) {
+            if (aw.id === w.id) { active = true; break; }
+        }
+        if (active) {
+            row.find("input").prop("checked", true);
+            row.addClass("applied");
+            if (w.bgColor) {
+                //do a better bg color and verify text color
+                row.css("background-color",w.bgColor);
+            }
+            //move up to the top
+            //row.after( $("<div>").addClass("marker").attr("i", row.attr("wID")) );
+            //row.parent().find(".titleRow").after(row);
+        }
+    }
+
+    $("input.arButton").switchButton({
+        //labels_placement: "right",
+        show_labels: false,
+        height: 16,
+        button_width: 16,
+        width: 32,
+    });
+
+    $("input.arButton").change(function(){
+        let $row = $(this).closest(".filterRow");
+        let w = weightIDtoWeight[parseInt( $row.attr("wID") )];
+        if (this.checked) {
+            $row.addClass("applied");
+            if (w.bgColor) {
+                //do a better bg color and verify text color
+                $row.css("background-color",w.bgColor);
+            }
+            activeWeights.push(w);
+
+            //move up to the top
+            /*setTimeout(function() {
+                $row.after( $("<div>").addClass("marker").attr("i", $row.attr("wID")) );
+                $row.parent().find(".titleRow").after($row);
+            }, 800);*/
+        }
+        else {
+            $row.removeClass("applied");
+            $row.css("background-color","");
+            var index = $.inArray(w, activeWeights); //delete it from active
+            if (index >= 0) { activeWeights.splice(index, 1); }
+
+            //move back to position
+            /*setTimeout(function() {
+                $(".marker[i='"+$row.attr("wID")+"']").delay(600).replaceWith($row);
+            }, 800);*/
+        }
+        //trigger update of class applications
+
+        updateLegend();
+
+        TEMPORARY_MOUSEOVER_WEIGHT = null;
+        filterListScrolled(); //update the rows scrolled in case we freed up color
+        updateInterfaceForActiveWeights();
+        //OVERLAY.updateSVGCirclesOnScreen();
+    });
+
+
+
+
+
+    //mouseenter
+    $(".filterRow").mouseenter(function() {
+        let w = weightIDtoWeight[parseInt($(this).attr("wID"))];
+
+        if (w.weightFunction && !$(this).hasClass("applied")) {
+            TEMPORARY_MOUSEOVER_WEIGHT = w;
+            applyActiveWeightsTo(allCircles);
+            OVERLAY.updateSVGCirclesOnScreen();
+            //OVERLAY.temporarilyRecolorSVGCircles(w.weightFunction);
+        }
+
+    });
+
+    $(".filterRow").mouseleave(function() {
+        //OVERLAY.temporarilyRecolorSVGCircles(function() {return {color: "#fff", opaque: false};});
+        TEMPORARY_MOUSEOVER_WEIGHT = null;
+        applyActiveWeightsTo(allCircles);
+        OVERLAY.updateSVGCirclesOnScreen();
+    });
+
+    //mouseleave
+
+    //on scrolling, assign BG colors to the rows onscreen that need them
+    filterListScrolled();
+    $("#filterContainer").scroll(filterListScrolled);
+
+    updateLegend();
+}
+
+
+function updateLegend() {
+
+    $("#filterConfig .legendRow").remove();
+    for (let w of activeWeights) {
+        if (w.needsLegend) {
+            let $row = $("<div>").addClass("legendRow");
+            $row.append( $("<div>").addClass("sample").css("background-color",w.bgColor) );
+            $row.append( $("<div>").addClass("label").text(w.name) );
+            $("#filterConfig .colorRow").before($row);
+        }
+    }
+
+}
+
+
+
+function filterListScrolled() {
+
+
+    //update tag colors
+    $(".filterRow").each(function() {
+
+        let w = weightIDtoWeight[parseInt($(this).attr("wID"))];
+        if (!w.needsNomColor || $(this).hasClass("applied")) {
+            return;
+        }
+
+
+
+        let viewHeight = $("#filterContainer").height();
+        let scrolltop = $("#filterContainer").scrollTop();
+        let onScreen = $(this).offset().top+$(this).height() >= -10 &&
+                       $(this).offset().top+$(this).height() <= viewHeight+40;
+
+        if (onScreen) {
+
+            if (w.bgColor == null) {
+                let freeColor;
+                if (AVAILABLE_COLORS.length < 1) {
+                    freeColor = Please.make_color({
+                                    golden: false, //disable default
+                                    full_random: true //go full random
+                                });
+                }
+                else {
+                    freeColor = AVAILABLE_COLORS.pop();
+                }
+                w.bgColor = freeColor;
+                $(this).find(".colorSample").css("background-color",w.bgColor);
+            }
+
+        }
+        else {
+            if (w.bgColor) {
+                AVAILABLE_COLORS.push(w.bgColor);
+                w.bgColor = null;
+            }
+            $(this).find(".colorSample").css("background-color","");
+        }
+
+    });
+
+
+}
+
+
+
+
+//WE USE THE AVERAGE OF WEIGHTED VALUES RATHER THAN THE
+
+
+function updateInterfaceForActiveWeights() {
+
+    let visibleCircles = applyActiveWeightsTo(allCircles);
+
+    updateLeafRankings();
+
+    /*
+    let leaves = [];
+    let i=visibleCircles.length-1;
+    while (i>=0) {
+        for (let row of visibleCircles[i].data_rows) {
+            leaves.push(LEAFROW_TO_NODE[row]);
+        }
+        i--;
+    }
+    console.log(leaves);*/
+
+
+    OVERLAY.updateSideBarWithLeaves(LEAVES_ONSCREEN, true);
+
+    OVERLAY.resetSimulation();
+
+}
+
+
+
+var TEMPORARY_MOUSEOVER_WEIGHT = null;
+function applyActiveWeightsTo(circles) {
+
+    let foundColor = false;
+    let foundSize = false;
+    let minC = Number.MAX_VALUE;
+    let maxC = -Number.MAX_VALUE;
+    let minR = Number.MAX_VALUE;
+    let maxR = -Number.MAX_VALUE;
+
+
+    let i=circles.length-1;
+    while (i>=0) {
+
+        let circle = circles[i];
+
+        /*
+        if (TEMPORARY_MOUSEOVER_WEIGHT) {
+            let wf = TEMPORARY_MOUSEOVER_WEIGHT.weightFunction(circle.data_rows);
+            if (TEMPORARY_MOUSEOVER_WEIGHT.needsNomColor) {
+                if (wf.nomColor) {
+                    circle.color = wf.nomColor;
+                }
+                else {
+                    circle.color = "#fff";
+                }
+            }
+            //else {
+            //    circle.color = DEFAULT_COLOR_SCALE(wf.color);
+            //}
+
+            //circle.r = circle.r;
+            if (wf.opaque == null) {
+                circle.opacity = 1;
+            }
+            else {
+                circle.opacity = 0.4 + wf.opaque*0.6;
+            }
+        }*/
+        if (activeWeights.length === 0 && TEMPORARY_MOUSEOVER_WEIGHT == null) {
+            /*let wf = fallbackWeight.weightFunction(circle.data_rows);
+            circle.color = DEFAULT_COLOR_SCALE(wf.color);
+            circle.r = wf.size * 5 + 1;
+            if (wf.opaque == null) {
+                circle.opacity = 1;
+            }
+            else {
+                circle.opacity = 0.4 + wf.opaque*0.6;
+            }*/
+            circle.color = "rgb(136, 194, 232)";
+            circle.r = 4;
+            circle.opaque = true;
+            circle.opacity = 1;
+
+        }
+        else {
+            let j=activeWeights.length-1;
+            let avgR = 0;
+            let nR = 0;
+            let avgC = 0;
+            let nC = 0;
+            let hasNomColor = false;
+            let nomColors = {};
+            let foundOpaque = false;
+            let opaque = false;
+            while (j>=0) {
+                let w = activeWeights[j];
+                let wf = w.weightFunction(circle.data_rows);
+
+                if (wf.size >= 0){
+                    avgR = avgR + wf.size;
+                    nR++;
+                }
+
+                if (w.needsNomColor && wf.nomColor) {
+                    hasNomColor = true;
+                    if (!(wf.nomColor in nomColors)) {
+                        nomColors[wf.nomColor] = 0;
+                    }
+                    nomColors[wf.nomColor] = nomColors[wf.nomColor] + 1;
+                }
+                else if (wf.color >= 0) {
+                    avgC = avgC + wf.color;
+                    nC++;
+                }
+
+                if (wf.opaque != null) {
+                    foundOpaque=true;
+                    opaque = opaque || wf.opaque;
+                }
+
+                j--;
+            }
+            //also factor in the new mouseover
+            if (TEMPORARY_MOUSEOVER_WEIGHT) {
+                let wf = TEMPORARY_MOUSEOVER_WEIGHT.weightFunction(circle.data_rows);
+
+                //ignore size
+                /*
+                if (wf.size >= 0){
+                    avgR = avgR + wf.size;
+                    nR++;
+                }*/
+
+                if (TEMPORARY_MOUSEOVER_WEIGHT.needsNomColor && wf.nomColor) {
+                    hasNomColor = true;
+                    if (!(wf.nomColor in nomColors)) {
+                        nomColors[wf.nomColor] = 0;
+                    }
+                    nomColors[wf.nomColor] = nomColors[wf.nomColor] + 1;
+                }
+                else if (wf.color >= 0) {
+                    avgC = avgC + wf.color;
+                    nC++;
+                }
+
+                if (wf.opaque != null) {
+                    foundOpaque=true;
+                    opaque = opaque || wf.opaque;
+                }
+            }
+
+
+            let colorVal = avgC / Math.max(nC, 1);
+            if (hasNomColor) {
+
+                let c = null;
+                let t = -1;
+                for (let color in nomColors) {
+                    if (nomColors[color] > t) { c = color; t = nomColors[color]; }
+                }
+                circle.color = c;
+                if (nC > 0) {
+                    let v = avgC / nC;
+                    minC = Math.min(v, minC);
+                    maxC = Math.max(v, maxC);
+                    foundColor = true;
+                }
+                circle.nom = true;
+            }
+            else if (nC === 0) {
+                circle.color = "rgb(136, 194, 232)";
+                circle.nom = true;
+            }
+            else {
+                let v = avgC / nC;
+                minC = Math.min(v, minC);
+                maxC = Math.max(v, maxC);
+                circle.color = v;
+                foundColor = true;
+                circle.nom = false;
+            }
+
+            if (nR === 0) {
+                circle.r = -1;
+            }
+            else {
+                let v = avgR / nR;
+                circle.r = v;
+                minR = Math.min(v, minR);
+                maxR = Math.max(v, maxR);
+                foundSize = true;
+            }
+
+            if (foundOpaque)  {
+                circle.opacity = 0.2 + 0.6*opaque;
+                circle.opaque=opaque;
+            }
+            else {
+                circle.opacity = 0.8;
+                circle.opaque = true;
+            }
+
+
+        }
+
+
+        i--;
+    }
+
+    //use ranges to normalize the sizes/colors
+    let visibleCircles = [];
+    i=circles.length-1;
+    while (i>=0) {
+        let circle = circles[i];
+
+        if (foundColor && !circle.nom && maxC > minC) {
+            circle.color = DEFAULT_COLOR_SCALE( (circle.color - minC) / (maxC-minC) );
+        }
+        else if (foundColor && !circle.nom && maxC === minC) {
+            circle.color = DEFAULT_COLOR_SCALE( 0.5 );
+        }
+
+        if (foundSize && circle.r >= 0 && maxR > minR) {
+            circle.r = ((circle.r - minR) / (maxR-minR)) * 4 + 2;
+        }
+        else {
+            circle.r = 4;
+        }
+
+        if (circle.opaque) {
+            visibleCircles.push(circle);
+        }
+
+        i--;
+    }
+
+
+    return visibleCircles;
+
+
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+//MARK --------------------POPOVER DRAW
 
 
 
@@ -3712,8 +5160,12 @@ SVGOverlay.prototype.fillNotePopover = function( node, projection, wrapperElemen
 
 
     headerContainer.append("div").attr("class", "ratings");
+    headerContainer.select('.ratings').append("span").attr("class","rank").text('#'+node.rank);
     headerContainer.select('.ratings').append("span").append("img")
         .attr("src", ratingImg);
+
+    headerContainer.append("div").attr("class", "explanation");
+    headerContainer.select('.explanation').append("span").text(explainLeaf(node));
 
     //small box ends here
 
@@ -3822,11 +5274,11 @@ SVGOverlay.prototype.fillNotePopover = function( node, projection, wrapperElemen
             $popoverContainer.css("z-index", 2000);
 
             //shift the whole container up if we would go below bottom of screen
-            let offsetX = $('#mapSVG').attr("width") - $popoverContainer.position().left
+            let offsetX = $('#mapSVG').innerWidth() - $popoverContainer.position().left
                                                - $(headerContainer.node()).width()
                                                - $snip.outerWidth()
                                                - 15; //pad
-            let offsetY = $('#mapSVG').attr("height") - $popoverContainer.position().top
+            let offsetY = $('#mapSVG').innerHeight() - $popoverContainer.position().top
                                                 - $(headerContainer.node()).height()
                                                 - $snip.outerHeight()
                                                 - $label.outerHeight()
@@ -3878,6 +5330,10 @@ SVGOverlay.prototype.fillNotePopover = function( node, projection, wrapperElemen
 
 SVGOverlay.prototype.updateNotePopoverContent = function( node, wrapperElement ) {
 
+    if (parseInt(d3.select(wrapperElement).attr("c_id")) === node.id) {
+        return;
+    }
+    d3.select(wrapperElement).attr("c_id",node.id);
 
 
     let row = node.data_rows[0];
@@ -3900,7 +5356,9 @@ SVGOverlay.prototype.updateNotePopoverContent = function( node, wrapperElement )
     let headerContainer = infobox.select(".header");
     headerContainer.select("span.name").text(name);
     headerContainer.select("span.ratings").text(rating+" stars");
+    headerContainer.select('.ratings .rank').text('#'+node.rank);
     headerContainer.select('div.ratings img').attr("src", ratingImg);
+    headerContainer.select('.explanation span').text(explainLeaf(node));
 
     let $popoverContainer = $(containerElement.node());
     let contentContainer = containerElement.select(".expandableContent");
@@ -3976,16 +5434,16 @@ SVGOverlay.prototype.updateNotePopoverContent = function( node, wrapperElement )
     $snip.css("margin-top", -1 * $snip.height());
     $snip.css("margin-left", -1 * $snip.width());
     //drawer anim
-    $(snippetsLabel.node()).unbind('click').click(function () {
+    $(snippetsLabel.node()).click(function () {
         //console.log(parseInt($snip.css("margin-top")));
         if (parseInt($snip.css("margin-top")) < -1) {
             $label.text("-");
             //shift the whole container up if we would go below bottom of screen
-            let offsetX = $('#mapSVG').attr("width") - $popoverContainer.position().left
+            let offsetX = $('#mapSVG').innerWidth() - $popoverContainer.position().left
                                                - $(headerContainer.node()).width()
                                                - $snip.outerWidth()
                                                - 15; //pad
-            let offsetY = $('#mapSVG').attr("height") - $popoverContainer.position().top
+            let offsetY = $('#mapSVG').innerHeight() - $popoverContainer.position().top
                                                 - $(headerContainer.node()).height()
                                                 - $snip.outerHeight()
                                                 - $label.outerHeight()
@@ -4033,6 +5491,53 @@ SVGOverlay.prototype.updateNotePopoverContent = function( node, wrapperElement )
 
 
 };
+
+
+SVGOverlay.prototype.fillSelectionPopover = function( node, wrapperElement, expandable ) {
+
+    let containerElement = d3.select(wrapperElement)
+                    .attr("node_id", node.id)
+                    .attr("class", "popover-wrapper")
+                    .append("div");
+    containerElement.attr("class", "popover selection-popover");
+
+    let infobox = containerElement.append("div").attr("class", "infobox");
+
+    let row = node.data_rows[0];
+
+    let name = node.data_src[row]['name'].trim();
+    let neighborhood = node.data_src[row]['neighborhood'];
+    let categories = node.data_src[row]['categories'];
+    let rating = node.data_src[row]['rating'];
+    let ratingImg = rating.toFixed(1) + '.png';
+    let url = node.data_src[row]['url'];
+    let highlights = node.data_src[row]['highlights'];
+    let num_reviews = node.data_src[row]['num_reviews'];
+    let images = node.data_src[row]['images'];
+    let price = node.data_src[row]['price'];
+
+    //small box starts here
+    let headerContainer = infobox.append("div");
+    headerContainer.attr("class", "header");
+
+    headerContainer.append("div").attr("class", "title");
+    headerContainer.select('.title').append("span")
+        .attr("class","name no-overflow")
+        .text(name);
+
+
+    headerContainer.append("div").attr("class", "ratings");
+    headerContainer.select('.ratings').append("span").attr("class","rank").text('#'+node.rank);
+    headerContainer.select('.ratings').append("span").append("img")
+        .attr("src", ratingImg);
+
+    headerContainer.append("div").attr("class", "explanation");
+    headerContainer.select('.explanation').append("span").text(explainLeaf(node));
+
+
+};
+
+
 
 
 SVGOverlay.prototype.fillLeafPopover = function( node, projection, wrapperElement, expandable ) {
@@ -4196,27 +5701,55 @@ SVGOverlay.prototype.fillGroupPopover = function ( node, containerElement ) {
 
 
 
-var CIRCLE_SIZE = 3;
-var BOX_SIZE = 3; //(usually 2x circle radius)
-var TILE_SIZE = 400; //px
 
-SVGOverlay.prototype.fetchOnlyOnscreenTilesAndRender = function (tiles, screenBounds, forceRender, renderParams) {
 
-    //console.log("RENDER")
-    //console.log(tiles)
 
-    let width = d3.select(this.svg).attr('width');
-    let height = d3.select(this.svg).attr('height');
-    let projection = this.getProjection();
 
-    let latMin = screenBounds.getSouthWest().lat();
-    let latMax = screenBounds.getNorthEast().lat();
-    let lonMin = screenBounds.getSouthWest().lng();
-    let lonMax = screenBounds.getNorthEast().lng();
 
-    function isPartiallyInBounds(x, y) {
-        if ((x >= 0) && (x <= width) &&
-           (y >= 0) && (y <= height)) {
+
+
+
+
+
+
+//MARK ---------------------- CANVAS TILING
+
+
+
+
+
+
+
+
+var BOX_SIZE = 4; //(usually 2x circle radius)
+
+var allCircles = [];
+var circleIDtoCircle = {};
+var datarowToCircle = {};
+var circle_quad_tree = null
+SVGOverlay.prototype.generateSVGCirclesForClustersAtCurrentZoom = function (nodes) {
+
+    //clear old circles out
+    $("#circles_overlay").children("circle.display").remove();
+
+
+    let projection = this.map.getProjection();
+    let projectionScreen = this.getProjection();
+    let bounds = this.map.getBounds();
+    let zoom = this.map.getZoom();
+    let latMin = bounds.getSouthWest().lat();
+    let latMax = bounds.getNorthEast().lat();
+    let lonMin = bounds.getSouthWest().lng();
+    let lonMax = bounds.getNorthEast().lng();
+    latMin = latMin - Math.abs(latMax - latMin) * 0.05;
+    latMax = latMax + Math.abs(latMax - latMin) * 0.05;
+    lonMin = lonMin - Math.abs(lonMax - lonMin) * 0.05;
+    lonMax = lonMax + Math.abs(lonMax - lonMin) * 0.05;
+
+
+    function isInBounds(lat, lon) {
+        if ((lat > latMin) && (lat < latMax) &&
+           (lon > lonMin) && (lon < lonMax)) {
             return true;
            }
         else {
@@ -4224,247 +5757,200 @@ SVGOverlay.prototype.fetchOnlyOnscreenTilesAndRender = function (tiles, screenBo
         }
     }
 
-    let tile_sort = {};
+    let runningID = 0;
+    allCircles = [];
+    circleIDtoCircle = {};
+    datarowToCircle = {};
 
-    let i=tiles.length-1;
-    while (i>=0) {
-        let tile = tiles[i];
-
-        let latLng = new google.maps.LatLng(tile.upperLeft.lat, tile.upperLeft.lon);
-        let proj = projection.fromLatLngToContainerPixel(latLng);
-
-        if (isPartiallyInBounds(proj.x, proj.y) ||
-            isPartiallyInBounds(proj.x+TILE_SIZE, proj.y) ||
-            isPartiallyInBounds(proj.x, proj.y+TILE_SIZE) ||
-            isPartiallyInBounds(proj.x+TILE_SIZE, proj.y+TILE_SIZE)) {
-
-            tile.proj = proj;
-
-            if (!(tile.x in tile_sort)) {
-                tile_sort[tile.x] = {};
-            }
-
-            if (!(tile.y in tile_sort[tile.x])) {
-                tile_sort[tile.x][tile.y] = tile;
-                tile_sort[tile.x][tile.y].node_id = [parseInt(tile_sort[tile.x][tile.y].node_id)];
-                tile_sort[tile.x][tile.y].node_sum = parseInt(tile_sort[tile.x][tile.y].node_id);
-            }
-            else {
-                let k=tile.circles.length-1;
-                tile_sort[tile.x][tile.y].node_sum += parseInt(tile.node_id);
-                tile_sort[tile.x][tile.y].node_id.push(tile.node_id);
-                while (k>=0) {
-                    tile_sort[tile.x][tile.y].circles.push(tile.circles[k]);
-                    k--;
-                }
-            }
-
-
-        }
-        i--;
-
-
-    }
-
-
-    let final_tiles = [];
-    for (let x_ind in tile_sort) {
-        for (let y_ind in tile_sort[x_ind]) {
-            final_tiles.push(tile_sort[x_ind][y_ind]);
-            this.renderTile(tile_sort[x_ind][y_ind], forceRender, renderParams);
-        }
-    }
-
-    return final_tiles;
-
-
-};
-
-
-SVGOverlay.prototype.renderTile = function (tile, forceRender, renderParams) {
-
-    let colorForNode = function (n) {
-        let v = DESC_STATS['rating'].scale(DATASET[n]['rating']);
-        if (v < 0.5) {
-            return d3.interpolateLab("#d8342c","#f2f2f2","#4a76b5")(v*2.0);
-        }
-        else {
-            return d3.interpolateLab("#f2f2f2","#4a76b5")((v-0.5)*2.0);
-        }
-    };
-
-    if (!('canvas' in tile) || forceRender) {
-
-        let offscreenCanvas = document.createElement('canvas');
-        //create offscreen draw, note padding by circle size in case on edges
-        offscreenCanvas.width = TILE_SIZE+(tile.overflow*2);
-        offscreenCanvas.height = TILE_SIZE+(tile.overflow*2);
-
-        let ctx=offscreenCanvas.getContext("2d");
-
-        let j=tile.circles.length-1;
-        while (j>=0) {
-            let c=tile.circles[j];
-            ctx.fillStyle = colorForNode(c.data_row);
-            ctx.beginPath();
-            ctx.arc(Math.floor(c.ox+tile.overflow),Math.floor(c.oy+tile.overflow),CIRCLE_SIZE,0,2*Math.PI);
-            ctx.stroke();
-            ctx.fill();
-
-            j--;
-        }
-
-        tile['canvas'] = ctx.getImageData(0, 0, offscreenCanvas.width, offscreenCanvas.height);
-
-
-    }
-
-
-};
-
-
-
-
-
-SVGOverlay.prototype.getCanvasTilesForClustersAtCurrentZoom = function (nodes) {
-
-    //takes in a list of nodes; for a given zoom level, either pulls from cache or sims circles
-    // sorts the resulting circles into standard tiles
-    //returns a complete set of (overlapping) tiles for all nodes in the list regardless of onscreen
-
-    let projection = this.map.getProjection();
-    let projectionScreen = this.getProjection();
-    let bounds = this.map.getBounds();
-    let zoom = this.map.getZoom();
-
-    var p = point2LatLng(TILE_SIZE,TILE_SIZE,projection,bounds,zoom);
-    this.TILE_LAT = p.lat();
-    this.TILE_LON = p.lng();
-    console.log(p);
-
-    //composit any new tilesets for given nodes
     let i = nodes.length - 1;
     while (i>=0) {
         let node = nodes[i];
 
-        if (!(zoom in this.CANVAS_TILE_DB)) {
-            this.CANVAS_TILE_DB[zoom] = {};
-        }
-        if (!(node.id in this.CANVAS_TILE_DB[zoom])) {
-            let bins = forceNodesForCluster(nodes[i], projectionScreen);
+        let circles = this.forceNodesForCluster(node, projectionScreen);
 
-            let sim = simulateWithBins(bins);
+        let j=circles.length-1;
+        while (j>=0) {
+            //sort them into tiles
+            let circle = circles[j];
+            circle['cluster'] = node;
+            circle['i'] = runningID;
 
-            let node_tile_map = {};
-
-            let j=sim.c.length-1;
-            while (j>=0) {
-                //sort them into tiles
-                let circle = sim.c[j];
-                circle['cluster'] = node;
-
-                let x_ind = Math.floor(circle.x / TILE_SIZE);
-                let y_ind = Math.floor(circle.y / TILE_SIZE);
-                let corner = point2LatLng(x_ind*TILE_SIZE,y_ind*TILE_SIZE,projection,bounds,zoom);
-                let corner2 = point2LatLng((x_ind-1)*TILE_SIZE,(y_ind+1)*TILE_SIZE,projection,bounds,zoom);
-
-                if (!(zoom in node_tile_map)) {
-                    node_tile_map[zoom] = {};
-                }
-                if (!(x_ind in node_tile_map[zoom])) {
-                    node_tile_map[zoom][x_ind] = {};
-                }
-                if (!(y_ind in node_tile_map[zoom][x_ind])) {
-                    let tile = { x: x_ind, //x,y,zoom make up unique identifier for tile
-                                 y: y_ind,
-                                 zoom: zoom,
-                                 node_id: node.id,
-                                 upperLeft: {   x: x_ind*TILE_SIZE,
-                                                y: y_ind*TILE_SIZE,
-                                                lat: corner.lat(),
-                                                lon: corner.lng()},
-                                 lowerRight: {  x: (x_ind+1)*TILE_SIZE,
-                                                y: (y_ind+1)*TILE_SIZE,
-                                                lat: corner2.lat(),
-                                                lon: corner2.lng()},
-                                 tile_sz: TILE_SIZE,
-                                 overflow: CIRCLE_SIZE,
-                                 circles: []
-                             };
-
-                    node_tile_map[zoom][x_ind][y_ind] = tile;
-                }
-
-                //create offset positions for the circles
-                circle['ox'] = circle.x - (x_ind*TILE_SIZE);
-                circle['oy'] = circle.y - (y_ind*TILE_SIZE);
-
-                node_tile_map[zoom][x_ind][y_ind].circles.push(circle);
-
-                j--;
+            allCircles.push(circle);
+            circleIDtoCircle[runningID] = circle;
+            let r = circle.data_rows.length;
+            while (r>=0) {
+                datarowToCircle[circle.data_rows[r]] = circle;
+                r--;
             }
 
-            this.CANVAS_TILE_DB[zoom][node.id] = node_tile_map;
-
+            runningID++;
+            j--;
         }
+
 
 
         i--;
     }
 
-    let all_tiles = [];
-    i = nodes.length - 1;
+    circle_quad_tree = d3.quadtree()
+        .x(function(d) {return d.x;})
+        .y(function(d) {return d.y;})
+        .addAll(allCircles);
+
+    applyActiveWeightsTo(allCircles);
+
+    this.simulateWithBins(allCircles);
+
+
+
+};
+
+SVGOverlay.prototype.updateSVGCirclesOnScreen = function () {
+
+    let starting_bounds = STARTING_ZOOM_SW_REF;
+    let bounds = this.map.getBounds();
+    let projection = this.getProjection();
+    let orig_corner_proj = projection.fromLatLngToContainerPixel(starting_bounds);
+    let cur_corner_proj = projection.fromLatLngToContainerPixel(bounds.getSouthWest());
+    let cur_ne_proj = projection.fromLatLngToContainerPixel(bounds.getNorthEast());
+    let left = cur_corner_proj.x;
+    let top = cur_ne_proj.y;
+    let right = cur_ne_proj.x;
+    let bot = cur_corner_proj.y;
+    let translate_x = orig_corner_proj.x - cur_corner_proj.x;
+    let translate_y = orig_corner_proj.y - cur_corner_proj.y;
+
+    let queue = {}; //null for not unscreen, remove if present, left 1 if need to be made
+    let temp = [];
+
+
+    /*
+
+    circle_quad_tree.visit(function(node, x1, y1, x2, y2) {
+    if (!node.length) {
+      do {
+        let d = node.data;
+        let x = d.x+translate_x;
+        let y = d.y+translate_y;
+        if ((x >= left) && (x < right) && (y >= top) && (y < bot)) {
+            queue[d.i] = 1;
+        }
+      } while (node = node.next);
+    }
+    return x1 >= right || y1 >= bot || x2 < left || y2 < top;
+    });*/
+
+    let i=allCircles.length-1;
     while (i>=0) {
-        let node = nodes[i];
-        let node_tile_map = this.CANVAS_TILE_DB[zoom][node.id];
-
-        for (let x_ind in node_tile_map[zoom]) {
-            for (let y_ind in node_tile_map[zoom][x_ind]) {
-                /*if (!(x_ind in all_tiles_map)) {
-                    all_tiles_map[x_ind] = {};
-                }
-                if (!(y_ind in all_tiles_map[x_ind])) {
-                    all_tiles_map[x_ind][y_ind] = [];
-                }
-
-                all_tiles_map[x_ind][y_ind].push(node_tile_map[zoom][x_ind][y_ind]);*/
-                all_tiles.push(node_tile_map[zoom][x_ind][y_ind]);
-
-            }
+        let d = allCircles[i];
+        let x = d.x+translate_x;
+        let y = d.y+translate_y;
+        if ((x >= left) && (x < right) && (y >= top) && (y < bot)) {
+            queue[d.i] = 1;
         }
         i--;
     }
 
-    return all_tiles;
+
+    //loop through present circles
+    $("#circles_overlay").children("circle.display").each( function() {
+
+        let e = d3.select(this);
+        let id = parseInt(e.attr("i"));
+        if (id in queue) {
+            let circle = circleIDtoCircle[id];
+            e.attr("fill",circle.color)
+                .attr("cx", Math.floor(circle.x))
+                .attr("cy", Math.floor(circle.y))
+                .attr("r", Math.round(circle.r))
+                .property("opaque", circle.opaque)
+                .attr("opacity", circle.opacity);
+
+            delete queue[id]; //if drawn and in queue, keep it
+            //UPDATE THE POINT STYLE HERE IF NEED BE
+        }
+        else {
+            delete circleIDtoCircle[id]['htmlnode'];
+            e.remove(); //if drawn but not in queue, delete
+        }
+
+    });
+    for (let k in queue) { //if in queue but not drawn, draw it
+        let circle = circleIDtoCircle[k];
+
+        let circleElement = d3.select("#circles_overlay").append("circle")
+                                .attr("class","display")
+                                .attr("i", k)
+                                .attr("cx", Math.floor(circle.x))
+                                .attr("cy", Math.floor(circle.y))
+                                .attr("r", Math.round(circle.r))
+                                .attr("stroke", "#444")
+                                .attr("opacity", circle.opacity)
+                                .property("opaque", circle.opaque)
+                                .attr("fill",circle.color)
+                                .attr("stroke-width", "1px");
+
+        circle.htmlnode = circleElement.node();
+
+
+    }
+
+
+    d3.select("#circles_overlay").style("transform","translate("+Math.floor(translate_x)+"px,"+Math.floor(translate_y)+"px)")
+                                 .attr("t_x",Math.floor(translate_x))
+                                 .attr("t_y",Math.floor(translate_y));
+
+    d3.select("#animation_overlay").style("transform","translate("+Math.floor(translate_x)+"px,"+Math.floor(translate_y)+"px)");
+
+
+};
+
+
+SVGOverlay.prototype.temporarilyRecolorSVGCircles = function (weightFunction) {
+
+    d3.selectAll("circle.display").each(function() {
+
+        let e = d3.select(this);
+        let circle = circleIDtoCircle[parseInt(this.getAttribute("i"))];
+        let wf = weightFunction(circle.data_rows);
+
+        if (wf.color) {
+            if (e.attr("old_fill") == null) {
+                e.attr("old_fill",e.attr("fill"));
+            }
+            e.attr("fill",wf.color);
+        }
+        if (wf.opaque == null) {
+            e.attr("opacity",1);
+        }
+        else {
+            e.attr("opacity", 0.4 + wf.opaque*0.6);
+        }
+
+
+    });
+
+};
+
+SVGOverlay.prototype.returnRecolorSVGCircles = function () {
+
+    d3.selectAll("circle.display").each(function() {
+
+        let e = d3.select(this);
+        if (e.attr("old_fill")) {
+            e.attr("fill",e.attr("old_fill"));
+            e.attr("old_fill",null);
+        }
+        e.attr("opacity",1);
+
+    });
 };
 
 
 
 
-function createCanvasForCluster(node, containerElement, projection) {
 
-
-
-    let bins = forceNodesForCluster(node, projection);
-
-    let sim = simulateWithBins(bins);
-
-    let canvas = d3.select(containerElement)
-                    .style("position", "absolute")
-                    .style("left", (sim.offset.x-8)+"px")
-                    .style("top", (sim.offset.y-8)+"px")
-                    .append("canvas")
-                    .attr('width', sim.width)
-                    .attr('height', sim.height);
-
-    drawForceCirclesOnto(sim.c, canvas.node(), sim.offset);
-
-}
-
-
-
-
-function forceNodesForCluster(node, projection) {
+SVGOverlay.prototype.forceNodesForCluster = function (node, projection) {
 
     let bins = {};
     let i=node.data_rows.length-1;
@@ -4488,80 +5974,108 @@ function forceNodesForCluster(node, projection) {
         bins[x_ind][y_ind].push({
             x: proj.x,
             dx: proj.x,
+            lat: latLng.lat(),
+            lon: latLng.lng(),
             y: proj.y,
             dy: proj.y,
-            data_row: n
+            data_rows: n
         });
 
         i--;
     }
 
-    return bins;
-
-}
-
-function simulateWithBins(bins) { //add heuristic here to pick correct bins
-
     let circles = [];
-    let x_min = Number.MAX_VALUE;
+    /*let x_min = Number.MAX_VALUE;
     let x_max = Number.MIN_VALUE;
     let y_min = Number.MAX_VALUE;
-    let y_max = Number.MIN_VALUE;
+    let y_max = Number.MIN_VALUE;*/
     for (let x in bins) {
         for (let y in bins[x]) {
 
             //take off the top for now
             let n = bins[x][y].pop();
+            n.data_rows = [n.data_rows];
+
+            //aggregate rows together
+            while(bins[x][y].length > 0) {
+                n.data_rows.push(bins[x][y].pop().data_rows);
+            }
+
+            //update the size
+
             //n['r'] = CIRCLE_SIZE;
 
-            x_min = Math.min(x_min, n.x);
-            x_max = Math.max(x_max, n.x);
-            y_min = Math.min(y_min, n.y);
-            y_max = Math.max(y_max, n.y);
+            // x_min = Math.min(x_min, n.x);
+            // x_max = Math.max(x_max, n.x);
+            // y_min = Math.min(y_min, n.y);
+            // y_max = Math.max(y_max, n.y);
 
             circles.push(n);
 
         }
     }
 
+    return circles;
 
-    let model = d3.forceSimulation()
+};
+
+SVGOverlay.prototype.simulateWithBins = function (circles) {
+
+
+    //add heuristic here to pick correct bins
+
+    let temp = this;
+    this.circlemodel = d3.forceSimulation()
                      //.alphaDecay(0.1)
                      //.force("fx",d3.forceX(function(d) {return(d.dx);}).strength(0.05))
                      //.force("fy",d3.forceY(function(d) {return(d.dy);}).strength(0.05))
-                     .force("collideForce",d3.forceCollide(function() {return CIRCLE_SIZE;}).strength(1).iterations(5))
+                     .force("collideForce",d3.forceCollide(function(d) {return d.r;}).strength(1).iterations(5))
                      .nodes(circles)
-                     .stop();
-
+                     //.on("tick", function() { OVERLAY.updateSVGCirclesOnScreen(); });
+    this.circlemodel.stop();
     let iters = 0;
     while(iters < 10) {
-        model.tick();
+        this.circlemodel.tick();
         iters++;
     }
-    model.stop();
+    this.circlemodel.stop();
 
-    return {c: circles,
-            offset: {x: x_min-8, y: y_min-8},
-            width: x_max-x_min+16,
-            height: y_max-y_min+16};
+    return circles;
+            /*offset: {x: x_min, y: y_min},
+            width: x_max-x_min,
+            height: y_max-y_min};*/
 
-}
+};
 
-function drawForceCirclesOnto(circles, canvas, offset) {
 
-    let i=circles.length-1;
+SVGOverlay.prototype.resetSimulation = function () {
+    this.circlemodel.stop();
+
+    let i=allCircles.length-1;
     while (i>=0) {
-        let c=circles[i];
-        let ctx=canvas.getContext("2d");
-        ctx.beginPath();
-        ctx.arc(parseInt(c.x-offset.x),parseInt(c.y-offset.y),CIRCLE_SIZE,0,2*Math.PI);
-        ctx.stroke();
-
+        let c = allCircles[i];
+        c.x = c.dx;
+        c.y = c.dy;
         i--;
     }
 
+    this.circlemodel = d3.forceSimulation()
+                     //.alphaDecay(0.1)
+                     //.force("fx",d3.forceX(function(d) {return(d.dx);}).strength(0.05))
+                     //.force("fy",d3.forceY(function(d) {return(d.dy);}).strength(0.05))
+                     .force("collideForce",d3.forceCollide(function(d) {return d.r;}).strength(1).iterations(5))
+                     .nodes(allCircles);
+                     //.on("tick", function() { OVERLAY.updateSVGCirclesOnScreen(); });
+    this.circlemodel.stop();
+    let iters = 0;
+    while(iters < 10) {
+        this.circlemodel.tick();
+        iters++;
+    }
+    this.circlemodel.stop();
+    this.updateSVGCirclesOnScreen();
+};
 
-}
 
 
 
@@ -4572,8 +6086,20 @@ function drawForceCirclesOnto(circles, canvas, offset) {
 
 
 
-
-
+var rad = function(x) {
+  return x * Math.PI / 180;
+};
+var getDistance = function(p1, p2) {
+  var R = 6378137; // Earth’s mean radius in meter
+  var dLat = rad(p2.lat - p1.lat);
+  var dLong = rad(p2.lng - p1.lng);
+  var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(rad(p1.lat)) * Math.cos(rad(p2.lat)) *
+    Math.sin(dLong / 2) * Math.sin(dLong / 2);
+  var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  var d = R * c;
+  return d; // returns the distance in meter
+};
 
 
 
@@ -4681,91 +6207,78 @@ function ready(data) {
         .addAll(LEAF_NODES);
 
 
+    //update the proximity figures for each node
+    var NEARBY_THRESHOLD = 500;
+    let x=LEAF_NODES.length-1;
+    while(x>=0) {
+        let nearby = []
+        let nx = LEAF_NODES[x];
+        let y=LEAF_NODES.length-1;
+        while(y>=0) {
+            if (x != y) {
+                let ny=LEAF_NODES[y];
+
+                if (getDistance({lat: data[nx.data_rows[0]][LATVAL],
+                                 lng: data[nx.data_rows[0]][LONVAL]},
+                                {lat: data[ny.data_rows[0]][LATVAL],
+                                 lng: data[ny.data_rows[0]][LONVAL]}) <= NEARBY_THRESHOLD) {
+                    nearby.push(ny.data_rows[0]);
+                }
+            }
+            y--;
+        }
+        nx.nearby_rows = nearby;
+        x--;
+    }
+
+
+    //console.log(LEAF_NODES);
+
+
     //gather initial stats
     gatherStats(LEAF_NODES);
 
 
+    populateWeights(); //create the default set of user weights
+    updateLeafRankings(); //call again later if need to update
 
 
-
-
-
-
-
-
-    /*
-    //TREE GRAPH  ------------------------------
-    //Draw the tree graph
-    var tree = d3.tree()
-     .size([360, 200])
-     .separation(function(a, b) { return (a.parentNode == b.parentNode ? 1 : 2) / a.depth; });;
-    //console.log(tree);
-
-    var line = d3.line()
-             .x(function(d){ return d.x; })
-             .y(function(d){return d.y; });
-    function lineData(d){
-        var points = [
-            {x: d.x, y: d.y},
-            {x: d.parentNode.x, y: d.parentNode.y}
-        ]
-        return line(points);
-    }
-
-    // Compute the new tree layout.
-    var root = d3.hierarchy(VIRTUAL_ROOT);
-    tree(root);
-
-    function project(x, y) {
-        var angle = (x - 90) / 180 * Math.PI, radius = y;
-        return [radius * Math.cos(angle), radius * Math.sin(angle)];
-    }
-    function updateTree() {
-        var link = treesvg.selectAll(".link")
-          .data(root.descendants().slice(1))
-        .enter().append("path")
-          .attr("class", "link")
-          .attr("d", function(d) {
-            return "M" + project(d.x, d.y)
-                + "C" + project(d.x, (d.y + d.parentNode.y) / 2)
-                + " " + project(d.parentNode.x, (d.y + d.parentNode.y) / 2)
-                + " " + project(d.parentNode.x, d.parentNode.y);
-          });
-
-        var node = treesvg.selectAll(".node")
-          .data(root.descendants())
-        .enter().append("g")
-          .attr("class", function(d) { return "node" + (d.children ? " node--internal" : " node--leaf"); })
-          .attr("transform", function(d) { return "translate(" + project(d.x, d.y) + ")"; });
-
-        node.append("circle")
-          .attr("r", 1)
-          .style("stroke", function(d) {
-                    if (d.highlighted) {
-                        return "purple";
-                    }
-                    else {
-                        return "steelblue";
-                    }
-                });
-
-    }
-    updateTree();
-
-    //END TREE GRAPH ------------------------------
-    */
-
-
-
-
-
-
+    //setup collapsible menus
+    $("#filterConfig .collapseButton").click(function()
+    {
+        //console.log($(this))
+        var curwidth = $(this).parent().offset(); //get offset value of the parent element
+        if($(this).prop("closed")) //compare margin-left value
+        {
+            //animate margin-left value to -490px
+            $(this).parent().animate({marginLeft: "0"}, 300 );
+            $(this).html('hide'); //change text of button
+            $(this).prop("closed",false);
+        }else{
+            //animate margin-left value 0px
+            $(this).parent().animate({marginLeft: -$(this).parent().width() - 4 + "px"}, 300 );
+            $(this).html('show'); //change text of button
+            $(this).prop("closed",true);
+        }
+    });
 
 
   //BUILD THE MAP ITSELF
   var map = new google.maps.Map(el, {
     disableDefaultUI: true,
+    zoomControl: true,
+    zoomControlOptions: {
+        position: google.maps.ControlPosition.BOTTOM_CENTER
+    },
+    scrollwheel: false,
+    clickableIcons: false,
     backgroundColor: '#FFFFFF'
+  });
+
+  $(window).resize(function() {
+    // (the 'map' here is the result of the created 'var map = ...' above)
+    FORCED_RESIZE = true;
+    google.maps.event.trigger(map, "resize");
   });
 
   map.fitBounds(BOUNDS);
@@ -4782,6 +6295,30 @@ function ready(data) {
 
 
 
+     $("#sidebar .collapseButton").prop("closed",true);
+     $("#sidebar .collapseButton").click(function()
+     {
+         //console.log($(this))
+         var curwidth = $(this).parent().offset(); //get offset value of the parent element
+         if($(this).prop("closed")) //compare margin-left value
+         {
+             //animate margin-left value to -490px
+             $(this).parent().animate({marginRight: "0"}, 300 );
+             $(this).html('hide'); //change text of button
+             $(this).prop("closed",false);
+             SHOULD_SHOW_POPOVERS = true;
+             OVERLAY.updateRecommendedPopovers();
+             OVERLAY.updatePopoverObjectsFromForce(false, false);
+         }else{
+             //animate margin-left value 0px
+             $(this).parent().animate({marginRight: -$(this).parent().width() - 4 + "px"}, 300 );
+             $(this).html('show'); //change text of button
+             $(this).prop("closed",true);
+             SHOULD_SHOW_POPOVERS = false;
+             OVERLAY.updateRecommendedPopovers();
+             OVERLAY.updatePopoverObjectsFromForce(false, false);
+         }
+     });
 
 
 
