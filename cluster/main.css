@@ -101,6 +101,9 @@ path.selected {
   z-index: 300;
 }
 
+#notetips {
+  z-index: 400;
+}
 
 div.tooltip {
   position: absolute;
@@ -223,7 +226,7 @@ div.tooltip {
 
 .clusterrow {
   padding: 3px 8px;
-  background-color: rgba(50, 67, 116, 0.9);
+  background-color: rgba(30, 80, 120, 0.9);
   font-size: 0.9em;
   color: #fff;
 }
@@ -265,6 +268,7 @@ div.tooltip {
   text-align: right;
   font-size: 0.9em;
   padding-top: 6px;
+  font-weight: bold;
 }
 
 .selection-popover .ratings {
@@ -309,17 +313,47 @@ div.tooltip {
 .note-popover {
   position: absolute;
   z-index: 400;
-  /*background-color: rgba(30, 80, 120, 0.9);*/
+  background-color: rgb(23, 65, 99);
   font-size: 0.9em;
   color: #fff;
   border-radius: 5px;
   -moz-border-radius: 5px;
   -webkit-border-radius: 5px;
+
+  max-height: 400px;
+  overflow-y: scroll;
+}
+
+.note-popover .pop-row {
+  border-top: 1px solid #fff;
+}
+
+.note-popover .pop-row:first-child {
+  border: none;
+}
+
+
+.note-popover .controlbox {
+  position: absolute;
+  left: 0;
+  width: 20px;
+}
+
+.note-popover .closeLabel {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 20px;
+  font-weight: bold;
+  text-align: center;
+  cursor: pointer;
+  padding: 8px 0 2px 2px;
 }
 
 .note-popover .infobox {
-  max-height: 72px;
-  padding: 6px 12px;
+  margin-left: 24px;
+  max-height: 82px;
+  padding: 6px 12px 6px 6px;
   overflow: hidden;
 }
 
@@ -343,6 +377,11 @@ div.tooltip {
   overflow: hidden;
 }
 
+.note-popover .reviews {
+  margin-left: 8px;
+  position: relative;
+  top: -4px;
+}
 
 .note-popover .expandableContent {
   text-align: center;
@@ -351,16 +390,13 @@ div.tooltip {
 
 .note-popover .expandLabel {
   position: absolute;
-  bottom: -24px;
-  left: 6px;
-  width: 30px;
-  height: 16px;
+  bottom: 0;
+  left: 0;
+  width: 20px;
   font-weight: bold;
+  text-align: center;
   cursor: pointer;
-  padding: 2px 0 6px 0;
-  border-radius: 0 0 5px 5px;
-  -moz-border-radius: 0 0 5px 5px;
-  -webkit-border-radius: 0 0 5px 5px;
+  padding: 2px 0 8px 2px;
 }
 
 .note-popover .details {
