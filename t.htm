@@ -1,0 +1,135 @@
+<html>
+<head>
+<style>
+
+#accepts {
+
+}
+#accepts .bar {
+font: 10px sans-serif;
+background-color: steelblue;
+text-align: right;
+padding: 3px;
+margin: 1px;
+color: white;
+}
+#rejects {
+  margin-top: 100px;
+}
+#rejects .bar {
+font: 10px sans-serif;
+background-color: rgb(210, 108, 24);
+text-align: right;
+padding: 3px;
+margin: 1px;
+color: white;
+}
+.bar {
+  position: absolute;
+  left:20;
+}
+.lab {
+font: 10px sans-serif;
+text-align: left;
+padding: 3px;
+margin: 1px;
+color: black;
+position:absolute;
+left:0;
+min-width: 300px;
+}
+.over {
+  height: 15px;
+  padding-bottom: 5px;
+}
+
+</style>
+<script src='https://cdnjs.cloudflare.com/ajax/libs/tabletop.js/1.5.1/tabletop.min.js'></script>
+<script src="https://d3js.org/d3.v4.min.js"></script>
+<script type='text/javascript'>
+  var publicSpreadsheetUrl = 'https://docs.google.com/spreadsheets/d/1YNg_yDD8s6IrAljfjkb2Sf77v8RHMnRK6Y7JFDon9R8/pubhtml';
+
+  function init() {
+    Tabletop.init( { key: publicSpreadsheetUrl,
+                     callback: showInfo,
+                     simpleSheet: true } )
+  }
+
+  function showInfo(data, tabletop) {
+
+      let acceptCount = 0;
+      let rejectCount = 0;
+      let categories = {};
+      for (let row of data) {
+        if (row["Accept/Reject"] === 'Accept') {
+          acceptCount++;
+        }
+        else if (row["Accept/Reject"] === 'Reject') {
+          rejectCount++;
+        }
+        for (let c of row["Topics"].split(',')) {
+          c = c.trim();
+          if (!(c in categories)) {
+            categories[c] = { cat: c,
+                              accept: 0,
+                              reject: 0 };
+          }
+
+          if (row["Accept/Reject"] === 'Accept') {
+            categories[c].accept = categories[c].accept + 1;
+          }
+          else if (row["Accept/Reject"] === 'Reject') {
+            categories[c].reject = categories[c].reject + 1;
+          }
+        }
+      }
+
+      for (let c in categories) {
+        categories[c].acceptNorm = categories[c].accept / acceptCount;
+        categories[c].rejectNorm = categories[c].reject / rejectCount;
+      }
+
+      console.log(categories)
+
+      let max_w = 700;
+
+      let dat = [];
+      for (let c in categories) {
+        dat.push(categories[c]);
+      }
+
+
+      d3.select('#accepts').selectAll('.over').data(dat).enter()
+        .append("div").attr("class","over").each( function (d,i) {
+
+          d3.select(this).append("div").attr("class","bar").style("width",(d.acceptNorm*max_w)+"px").text(d.accept);
+          d3.select(this).append("div").attr("class","lab").style("left",(d.acceptNorm*max_w+30)+"px").text(d.cat);
+
+        });
+      d3.select('#rejects').selectAll('.over').data(dat).enter()
+        .append("div").attr("class","over").each( function (d,i) {
+
+          d3.select(this).append("div").attr("class","bar").style("width",(d.rejectNorm*max_w)+"px").text(d.reject);
+          d3.select(this).append("div").attr("class","lab").style("left",(d.rejectNorm*max_w+30)+"px").text(d.cat);
+
+        });
+
+
+
+
+
+
+
+  }
+
+  window.addEventListener('DOMContentLoaded', init)
+</script>
+</head>
+
+<body>
+
+<div id="accepts"></div>
+<div id="rejects"></div>
+
+</body>
+</html>
