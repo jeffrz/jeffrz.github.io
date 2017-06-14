@@ -2,8 +2,10 @@
 <head>
 <style>
 
-#accepts {
+.topl {
 
+  font: 12px sans-serif;
+  padding: 5px;
 }
 #accepts .bar {
 font: 10px sans-serif;
@@ -56,7 +58,7 @@ min-width: 300px;
   }
 
   function showInfo(data, tabletop) {
-
+      console.log(data);
       let acceptCount = 0;
       let rejectCount = 0;
       let categories = {};
@@ -89,7 +91,8 @@ min-width: 300px;
         categories[c].rejectNorm = categories[c].reject / rejectCount;
       }
 
-      console.log(categories)
+      console.log(categories);
+      console.log(acceptCount);
 
       let max_w = 700;
 
@@ -98,6 +101,7 @@ min-width: 300px;
         dat.push(categories[c]);
       }
 
+      d3.select("#accepts").append("div").attr("class",'topl').text(acceptCount + " total accepts");
 
       d3.select('#accepts').selectAll('.over').data(dat).enter()
         .append("div").attr("class","over").each( function (d,i) {
@@ -106,6 +110,8 @@ min-width: 300px;
           d3.select(this).append("div").attr("class","lab").style("left",(d.acceptNorm*max_w+30)+"px").text(d.cat);
 
         });
+
+      d3.select("#rejects").append("div").attr("class",'topl').text(rejectCount + " total rejects");
       d3.select('#rejects').selectAll('.over').data(dat).enter()
         .append("div").attr("class","over").each( function (d,i) {
 
