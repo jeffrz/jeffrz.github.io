@@ -1,0 +1,3 @@
+[submodule "info3300-spr2018"]
+	path = info3300-spr2018
+	url = git@github.com:jeffrz/info3300-spr2018.git
