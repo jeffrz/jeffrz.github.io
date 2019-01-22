@@ -1,0 +1,22 @@
+body {
+  font-family: 'Lato', 'Helvetica', sans-serif;
+  font-weight: 400;
+}
+h1, h2, h3, h4, h5 {
+  font-family: 'Raleway', 'Helvetica', sans-serif;
+  font-weight: 700;
+}
+.container {
+  max-width: 768px;
+}
+.larger {
+  max-width: 900px;
+}
+.doc-section {
+  padding: 2rem 0;
+  border-top: 1px solid #eee;
+  margin-bottom: 0
+}
+.fixed-cell {
+  width: 150px;
+}
