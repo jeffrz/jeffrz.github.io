@@ -1,6 +1,3 @@
-[submodule "info3300-spr2020"]
-	path = info3300-spr2020
-	url = https://github.com/jeffrz/info3300-spr2020.git
 [submodule "info4310-fa2020"]
 	path = info4310-fa2020
 	url = https://github.com/jeffrz/info4310-fa2020.git
