@@ -1,1 +1,4 @@
 
+[submodule "info3300-fa2023"]
+	path = info3300-fa2023
+	url = https://github.com/jeffrz/info3300-fa2023.git
