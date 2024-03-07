@@ -1,0 +1,24 @@
+# Instructor files #
+*.prof*.htm
+*.prof*.html
+*.prof*.docx
+*.prof*.py
+*.prof*.sh
+*.prof*.ai
+*.prof*/
+
+# others #
+*.pyc
+*.com
+*.class
+*.dll
+*.exe
+*.o
+*.so
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
